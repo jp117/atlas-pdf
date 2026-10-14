@@ -143,3 +143,34 @@ pub(crate) fn menu(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
 pub(crate) fn tool_from_name(name: &str) -> Option<QuickTool> {
     Status::ALL.into_iter().find(|s| tool_name(*s) == name).map(QuickTool::Takeoff)
 }
+
+/// The takeoff tools in the floating tool strip beside the page: a divider, then a green, a
+/// yellow and a red box, each with its key in the corner.
+pub(crate) fn quick_bar_tools(app: &mut PdfCraftApp, ui: &mut egui::Ui, t: &crate::theme::Tokens) {
+    use egui::{Rect, Sense, Stroke, vec2};
+    let (line, _) = ui.allocate_exact_size(vec2(32.0, 9.0), Sense::hover());
+    ui.painter().hline(line.x_range().shrink(6.0), line.center().y, Stroke::new(1.0, t.divider));
+    for status in Status::ALL {
+        let selected = app.quick_tool == QuickTool::Takeoff(status);
+        let (rect, resp) = ui.allocate_exact_size(vec2(32.0, 32.0), Sense::click());
+        let press = crate::theme::Press::track(ui, &resp);
+        press.wash(ui, rect, t.radius, selected);
+        let body = rect.translate(press.offset());
+        let colour = takeoff_tool::color(status);
+        let mark = Rect::from_center_size(body.center() - vec2(1.0, 1.0), vec2(16.0, 13.0));
+        ui.painter().rect_filled(mark, 2.0, colour.gamma_multiply(0.18));
+        ui.painter().rect_stroke(mark, 2.0, Stroke::new(2.5, colour), egui::StrokeKind::Middle);
+        ui.painter().text(
+            body.right_bottom() + vec2(-3.0, -1.0),
+            egui::Align2::RIGHT_BOTTOM,
+            status.hotkey(),
+            crate::theme::medium(9.0),
+            t.text_faint,
+        );
+        let label = status.label();
+        resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Button, true, selected, label));
+        if crate::theme::hand(resp).on_hover_text(format!("{label} (key {})", status.hotkey())).clicked() {
+            pick_tool(app, status);
+        }
+    }
+}

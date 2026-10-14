@@ -4034,6 +4034,8 @@ fn quick_bar(app: &mut PdfCraftApp, area: Rect, ui: &mut egui::Ui) {
                                 ui.close();
                             }
                         });
+                    // Atlas fork: the green, yellow and red takeoff boxes.
+                    crate::atlas::quick_bar_tools(app, ui, &t);
                     if matches!(current_fill, Some(crate::fill_sign::FillTool::Text | crate::fill_sign::FillTool::Date)) {
                         ui.label(tl!("Font size:"));
                         ui.add(
