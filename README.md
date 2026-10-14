@@ -27,11 +27,13 @@ Box equipment on a drawing to record whether Atlas quotes it:
   filled with a see-through tint of their colour, so the drawing stays readable.
 - The box is labelled with the text inside it, including AutoCAD SHX text, so a disconnect boxed
   on an AutoCAD sheet arrives labelled `1600A D.S.#1 1500A FU`.
-- A yellow box asks for its comment straight away (Enter adds, Esc cancels).
+- Every box goes on in one drag, yellow included: comments are written on the quote, not on the
+  boxes.
 - Click a box (without dragging) to select it: `Delete` removes it, and `1`/`2`/`3` re-mark
   it. With nothing selected, `1`/`2`/`3` pick the tool.
 - The **Takeoff** panel lists every mark sheet by sheet with a count per status. You can filter
-  it and edit a mark's status, label and comment, and **Export takeoff as CSV** saves the list.
+  it and edit a mark's status and label, and **Export takeoff as CSV** saves the list (page,
+  sheet, status, label, author).
 
 Marks are standard PDF Square annotations with the subject `Atlas Takeoff: Included` (etc.), so
 Acrobat and Bluebeam show them in their markup lists. Atlas's own data lives in a private
