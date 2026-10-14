@@ -87,6 +87,21 @@ cargo test -p pdfcraft-atlas                # Atlas's own rules
 Scope builds and tests to the crates you touched (see `CLAUDE.md`). A full workspace build takes
 about 11 minutes on a 12-core machine.
 
+### Installing on a PC
+
+```sh
+cargo build --release -p pdfcraft -p pdfcraft-cli
+cargo xtask models                      # OCR models for Scan & OCR (optional)
+powershell -ExecutionPolicy Bypass -File packaging\windows\install-atlas.ps1
+```
+
+This installs Atlas PDF for the current user in `%LOCALAPPDATA%\Programs\Atlas PDF`, without
+administrator rights. It adds a Start menu shortcut and an "Open with Atlas PDF" entry on PDFs,
+and registers the app so it can be the PDF default. Windows leaves that choice to you: the
+script opens **Settings ▸ Default apps ▸ Atlas PDF**, where you set `.pdf` to Atlas PDF. Run it
+again after a new build to update (close Atlas PDF first). Add `-Uninstall` to remove it; your
+settings in `%APPDATA%\AtlasPDF` are kept.
+
 ## Working on the fork
 
 PdfCraft moves fast: hundreds of commits a day, with `crates/ui-egui` the most contested. Atlas
