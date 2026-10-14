@@ -134,6 +134,8 @@ impl PdfCraftApp {
                         }
                     }
                     Edit::DeleteAnnotation { .. } => view.comments.selected = None,
+                    // Atlas fork: a new takeoff box stays unselected, so the next drag draws.
+                    Edit::AddTakeoffMark(_) => view.comments.selected = None,
                     _ => {}
                 }
                 if std::mem::take(&mut view.comments.tool_done) && !self.comment_prefs.pinned {
@@ -870,6 +872,8 @@ fn content_page(edit: &Edit) -> Option<usize> {
 fn comment_page(edit: &Edit) -> Option<usize> {
     match edit {
         Edit::AddAnnotation(a) => Some(a.page),
+        Edit::AddTakeoffMark(m) => Some(m.page),
+        Edit::UpdateTakeoffMark { page, .. } => Some(*page),
         Edit::DeleteAnnotation { page, .. }
         | Edit::SetAnnotationContents { page, .. }
         | Edit::ReplyToAnnotation { page, .. }

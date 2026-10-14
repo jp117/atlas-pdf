@@ -2309,6 +2309,7 @@ pub fn document_area(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui) {
         | QuickTool::Link
         | QuickTool::SignArea { .. }
         | QuickTool::MarqueeZoom
+        | QuickTool::Takeoff(_)
         | QuickTool::Snapshot => false,
     };
     let prefs = &app.comment_prefs;
@@ -2582,6 +2583,7 @@ pub fn document_area(app: &mut PdfCraftApp, index: usize, ui: &mut egui::Ui) {
             if let QuickTool::Measure(measure_tool) = tool {
                 crate::measure_ui::page_input(ui, &resp, doc, view, &pcx, measure_tool, units);
             }
+            crate::atlas::page(ui, &resp, doc, view, &xf, i, &mut app.atlas, tool, &prefs.author);
 
             // Form fields take clicks first with the Select tool (as Acrobat fills fields in
             // every viewing mode); then comments; then text selection.

@@ -693,6 +693,7 @@ impl Host for crate::PdfCraftApp {
             },
             "quick_tool": match self.quick_tool {
                 crate::QuickTool::Measure(t) => format!("measure-{}", t.name()),
+                crate::QuickTool::Takeoff(s) => crate::atlas::tool_name(s),
                 crate::QuickTool::Select => "select".to_string(),
                 crate::QuickTool::Hand => "hand".to_string(),
                 crate::QuickTool::Crop => "crop".to_string(),

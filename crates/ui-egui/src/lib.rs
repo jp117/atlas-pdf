@@ -50,6 +50,8 @@ mod export_ui;
 mod js_ui;
 mod marks_ui;
 mod measure_ui;
+// Atlas fork: takeoff tools and panels.
+mod atlas;
 mod ocr_ui;
 mod optimize_ui;
 mod search_ui;
@@ -235,6 +237,8 @@ pub enum QuickTool {
     /// Edit ▸ Column Select: drag a rectangle to select only the text inside it (#740). The
     /// Select tool does the same while Alt/Option is held at the start of a drag.
     ColumnSelect,
+    /// Atlas fork: a takeoff tool (drag a status-coloured box over equipment).
+    Takeoff(pdfcraft_atlas::takeoff::Status),
 }
 
 /// A file dropped on a page grid: its name, and its bytes or, for a file on disk, the path they are
@@ -754,6 +758,8 @@ pub struct PdfCraftApp {
     /// The Create signature / initials dialog, and its typed preview.
     pub signature_draft: fill_sign::SigDraft,
     pub(crate) signature_preview: Option<(fill_sign::SavedSig, egui::TextureHandle)>,
+    /// Atlas fork: takeoff state.
+    pub(crate) atlas: atlas::AtlasState,
     /// The Scan tab's photo, keyed by its version.
     pub(crate) signature_photo: Option<(u64, egui::TextureHandle)>,
     pub(crate) saved_signature_previews: [Option<(fill_sign::SavedSig, egui::TextureHandle)>; 2],
@@ -1022,6 +1028,7 @@ impl PdfCraftApp {
             initials: None,
             signature_draft: Default::default(),
             signature_preview: None,
+            atlas: Default::default(),
             signature_photo: None,
             saved_signature_previews: [None, None],
             sign_graphic: sign_ui::SignGraphic::Name,
@@ -2513,6 +2520,7 @@ impl PdfCraftApp {
                 // `--quick select|hand|note|freetext|highlight|underline|strikeout|ink|line|arrow|square|circle`
                 self.quick_tool = match value {
                     "select" => QuickTool::Select,
+                    takeoff if takeoff.starts_with("takeoff-") => atlas::tool_from_name(takeoff).ok_or_else(|| format!("unknown tool {takeoff}"))?,
                     measure if measure.starts_with("measure-") => QuickTool::Measure(
                         measure_ui::Tool::from_name(measure.trim_start_matches("measure-")).ok_or_else(|| format!("unknown tool {measure}"))?,
                     ),
@@ -2664,6 +2672,7 @@ impl PdfCraftApp {
                 }
             }
             self.tool_keys(i, ctx);
+            atlas::keys(self, i, ctx);
             if self.quick_tool == QuickTool::EditText
                 && let Some(doc) = self.session.get(self.views[i].id).filter(|d| d.allows_modification())
             {

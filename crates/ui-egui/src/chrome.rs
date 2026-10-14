@@ -604,6 +604,7 @@ fn main_menu(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
                 }
             });
         });
+        ui.menu_button("Atlas", |ui| crate::atlas::menu(app, ui));
         ui.menu_button(tl!("Help"), |ui| crate::commands::registry_menu(app, ui, "Help"));
     });
 }
