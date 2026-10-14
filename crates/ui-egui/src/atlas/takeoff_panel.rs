@@ -1,5 +1,6 @@
 //! The Takeoff panel: the three tools with their counts, every mark sheet by sheet, the selected
-//! mark's status, label and comment, and CSV export.
+//! mark's status and label, and CSV export. Comments go on the quote, not on boxes, so the panel
+//! has none (a comment another program left on a box is kept when the box is edited).
 
 use super::takeoff_tool::color;
 use crate::{PdfCraftApp, QuickTool};
@@ -127,12 +128,7 @@ fn body(app: &mut PdfCraftApp, ui: &mut egui::Ui) -> Option<Action> {
             ui.painter().rect_filled(swatch, 2.0, color(m.status));
             ui.selectable_label(is_selected, label)
         });
-        let mut row = row.inner;
-        if !m.comment.is_empty() {
-            row = row.on_hover_text(&m.comment);
-            ui.label(RichText::new(format!("    {}", m.comment)).small().weak());
-        }
-        if row.clicked() {
+        if row.inner.clicked() {
             action = Some(Action::Select(m.page, m.index));
         }
     }
@@ -167,8 +163,6 @@ fn body(app: &mut PdfCraftApp, ui: &mut egui::Ui) -> Option<Action> {
         });
         ui.label("Label");
         ui.add(egui::TextEdit::singleline(&mut e.label).desired_width(f32::INFINITY).char_limit(MAX_TEXT));
-        ui.label("Comment");
-        ui.add(egui::TextEdit::multiline(&mut e.comment).desired_rows(3).desired_width(f32::INFINITY).char_limit(MAX_TEXT));
         ui.horizontal(|ui| {
             let text = MarkText { status: e.status, label: e.label.clone(), comment: e.comment.clone() };
             if ui.add_enabled(can_edit, egui::Button::new("Save")).clicked() {

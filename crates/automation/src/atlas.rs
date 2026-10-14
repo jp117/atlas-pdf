@@ -187,7 +187,7 @@ pub(crate) fn tools() -> Vec<ToolDef> {
         def(
             "takeoff_export",
             "Export the takeoff",
-            "Atomically write every takeoff mark as spreadsheet-safe CSV (page, sheet, status, label, comment, author), or as JSON with counts and rectangles when out ends in .json.",
+            "Atomically write every takeoff mark as spreadsheet-safe CSV (page, sheet, status, label, author), or as JSON with counts and rectangles when out ends in .json.",
             false,
             schema(json!({"doc": doc(), "out": {"type": "string", "description": "A file path (relative to --root when set)."}}), &["doc", "out"]),
         ),

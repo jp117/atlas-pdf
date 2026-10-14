@@ -5749,8 +5749,8 @@ fn takeoff_marks_add_label_list_update_save_and_export() {
     assert_eq!(ok(&mut a, "takeoff_list", json!({"doc":reopened}))["marks"], updated["marks"]);
     assert_eq!(ok(&mut a, "takeoff_export", json!({"doc":reopened,"out":"takeoff.csv"}))["count"], 2);
     let csv = std::fs::read_to_string(dir.join("takeoff.csv")).unwrap();
-    assert!(csv.starts_with("Page,Sheet,Status,Label,Comment,Author\r\n"), "{csv}");
-    assert!(csv.contains(",Included w/ comments,MDP,by utility,Estimator\r\n"), "{csv}");
+    assert!(csv.starts_with("Page,Sheet,Status,Label,Author\r\n"), "{csv}");
+    assert!(csv.contains(",Included w/ comments,MDP,Estimator\r\n"), "{csv}");
     ok(&mut a, "takeoff_export", json!({"doc":reopened,"out":"takeoff.json"}));
     let exported: Value = serde_json::from_str(&std::fs::read_to_string(dir.join("takeoff.json")).unwrap()).unwrap();
     assert_eq!(exported["counts"], json!({"included":1,"included_with_comments":1,"excluded":0}));

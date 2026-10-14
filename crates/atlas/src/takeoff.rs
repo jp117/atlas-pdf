@@ -324,13 +324,13 @@ pub fn list(doc: &Document) -> Listing {
     out
 }
 
-/// The marks as CSV (RFC 4180), one row per mark. `sheet` names a 0-based page (its page label
+/// The marks as CSV (RFC 4180), one row per mark. No comment column: comments are written on the
+/// quote, not on boxes. `sheet` names a 0-based page (its page label
 /// or sheet number; empty when unknown).
 pub fn to_csv(marks: &[Mark], sheet: &dyn Fn(usize) -> String) -> String {
-    let mut out = String::from("Page,Sheet,Status,Label,Comment,Author\r\n");
+    let mut out = String::from("Page,Sheet,Status,Label,Author\r\n");
     for m in marks {
-        let row =
-            [m.page.saturating_add(1).to_string(), sheet(m.page), m.status.label().to_owned(), m.label.clone(), m.comment.clone(), m.author.clone()];
+        let row = [m.page.saturating_add(1).to_string(), sheet(m.page), m.status.label().to_owned(), m.label.clone(), m.author.clone()];
         let cells: Vec<String> = row.iter().map(|c| csv_cell(c)).collect();
         out.push_str(&cells.join(","));
         out.push_str("\r\n");
@@ -507,10 +507,11 @@ mod tests {
             author: "A".into(),
             rect: [0.0; 4],
         };
-        let csv = to_csv(&[m("LP-1", "by others, see E-401"), m("=1+1", "say \"no\"")], &|p| format!("E-{p}"));
+        let csv = to_csv(&[m("LP-1, LP-2", "never exported"), m("=1+1", ""), m("say \"no\"", "")], &|p| format!("E-{p}"));
         let lines: Vec<&str> = csv.split("\r\n").collect();
-        assert_eq!(lines[0], "Page,Sheet,Status,Label,Comment,Author");
-        assert_eq!(lines[1], "3,E-2,Excluded,LP-1,\"by others, see E-401\",A");
-        assert_eq!(lines[2], "3,E-2,Excluded,'=1+1,\"say \"\"no\"\"\",A");
+        assert_eq!(lines[0], "Page,Sheet,Status,Label,Author");
+        assert_eq!(lines[1], "3,E-2,Excluded,\"LP-1, LP-2\",A");
+        assert_eq!(lines[2], "3,E-2,Excluded,'=1+1,A");
+        assert_eq!(lines[3], "3,E-2,Excluded,\"say \"\"no\"\"\",A");
     }
 }
