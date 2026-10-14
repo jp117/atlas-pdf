@@ -58,13 +58,13 @@ const APP_ICON_PNG: &[u8] = include_bytes!("../../../assets/app-icon/hicolor/256
 const LEGACY_STORAGE_KEY: &str = "printcraft";
 
 /// The settings folder: `app.ron` and the `logs` folder (docs/development.md). In portable mode
-/// it is `PdfCraftData` beside the executable (#157). eframe would otherwise derive it from the
-/// app id; keep it under "PdfCraft".
+/// it is the portable data folder beside the executable (#157). eframe would otherwise derive it
+/// from the app id. Atlas fork: `AtlasPDF`, apart from an installed PdfCraft's.
 fn settings_dir() -> Option<std::path::PathBuf> {
     if let Some(dir) = pdfcraft_ui_egui::portable::data_dir() {
         return Some(dir.to_path_buf());
     }
-    eframe::storage_dir("PdfCraft")
+    eframe::storage_dir(pdfcraft_atlas::brand::DATA_NAME)
 }
 
 /// Move the settings and crash-recovery folders of the app's former name, PrintCraft, to the new
@@ -79,7 +79,7 @@ fn migrate_legacy_folders() {
     // Recovery lives in the settings folder except on Windows, where it is under %LOCALAPPDATA%.
     if cfg!(windows) {
         let local = std::env::var_os("LOCALAPPDATA").filter(|v| !v.is_empty()).map(std::path::PathBuf::from);
-        moves.push((local.as_ref().map(|d| d.join("PrintCraft")), local.map(|d| d.join("PdfCraft"))));
+        moves.push((local.as_ref().map(|d| d.join("PrintCraft")), local.map(|d| d.join(pdfcraft_atlas::brand::DATA_NAME))));
     }
     for (old, new) in moves {
         let (Some(old), Some(new)) = (old, new) else { continue };
