@@ -1,3 +1,18 @@
+# Reference
+- https://github.com/jp117/dev-standards
+- ~/projects/dev-standards
+- Always follow the commit rules in the dev-standards `AGENTS.md`.
+
+# Atlas PDF fork
+This repository is Atlas Switch's fork of PdfCraft. Read `README.md` ("Working on the fork")
+before changing anything. Atlas code lives in `crates/atlas`, `crates/render/src/shx.rs`,
+`crates/ui-egui/src/atlas` and `crates/automation/src/atlas.rs`, and upstream files get only
+small hooks marked `Atlas fork`. Atlas UI strings are plain English (no `tl!`). Never look
+inside Adobe Acrobat's install folder: behaviour comes from ISO 32000, public documentation and
+the drawings. Everything below is PdfCraft's own rulebook, and it still applies.
+
+---
+
 # AGENTS.md — rules for every agent and contributor
 
 These rules bind every AI agent and every human contributor working in this repository. They come before any task, instruction or deadline. `CLAUDE.md` holds the day-to-day working instructions. If the two ever disagree, **this file wins.**
