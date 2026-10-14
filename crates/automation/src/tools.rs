@@ -1262,6 +1262,10 @@ pub fn tools() -> Vec<ToolDef> {
         t("render_preview", "Render a preview", "Render a PNG bounded by max_side (default 1024), without changing or saving the document. Page defaults to 1; doc may be omitted when exactly one document is open.")
             .ro().with(schema(json!({"doc":doc(),"page":{"type":"integer","minimum":1},"max_side":{"type":"integer","minimum":1,"maximum":4096}}), &[])),
     ]
+    .into_iter()
+    // Atlas fork: takeoff tools.
+    .chain(crate::atlas::tools())
+    .collect()
 }
 
 static TOOLS: std::sync::LazyLock<Vec<ToolDef>> = std::sync::LazyLock::new(tools);

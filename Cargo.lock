@@ -3947,6 +3947,7 @@ dependencies = [
  "base64 0.22.1",
  "flate2",
  "image",
+ "pdfcraft-atlas",
  "pdfcraft-cos",
  "pdfcraft-engine",
  "pdfcraft-fonts",

@@ -12,6 +12,8 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
 mod a11y;
+// Atlas fork: takeoff tools.
+mod atlas;
 mod batch;
 mod comments;
 mod content;
@@ -797,6 +799,10 @@ impl Automation {
             "comments_summarize" => self.comments_summarize(&a)?,
             "comment_edit" => self.comment_edit(&a)?,
             "comment_delete" => self.comment_delete(&a)?,
+            "takeoff_list" => self.takeoff_list(&a)?,
+            "takeoff_add" => self.takeoff_add(&a)?,
+            "takeoff_update" => self.takeoff_update(&a)?,
+            "takeoff_export" => self.takeoff_export(&a)?,
             other => return Err(ToolError::UnknownTool(other.into())),
         };
         Ok(vec![Content::Json(out)])

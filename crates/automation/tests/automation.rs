@@ -5717,3 +5717,55 @@ fn absolute_gotor_consent_does_not_bypass_validation_or_passwords() {
     assert_eq!(opened["document"]["encrypted"], true);
     assert_eq!(opened["destination_applied"], true);
 }
+
+#[test]
+fn takeoff_marks_add_label_list_update_save_and_export() {
+    let dir = workdir("takeoff");
+    let mut a = auto(&dir);
+    let doc = ok(&mut a, "doc_open", json!({"path":"a.pdf"}))["doc"].as_u64().unwrap();
+    // Without a label, the text inside the box labels the mark.
+    let added = ok(&mut a, "takeoff_add", json!({"doc":doc,"page":1,"rect":[10,120,150,170],"status":"included"}));
+    assert_eq!(added["label"], "Page 1");
+    let excluded = json!({"doc":doc,"page":1,"rect":[10,10,60,40],"status":"excluded","label":"MDP","comment":"by utility","author":"Estimator"});
+    ok(&mut a, "takeoff_add", excluded);
+    let all = ok(&mut a, "takeoff_list", json!({"doc":doc}));
+    assert_eq!(all["count"], 2);
+    assert_eq!(all["counts"], json!({"included":1,"included_with_comments":0,"excluded":1}));
+    let first = &all["marks"][0];
+    assert_eq!((&first["page"], &first["index"], &first["status"]), (&json!(1), &json!(1), &json!("included")));
+    assert_eq!(first["rect"], json!([10.0, 120.0, 150.0, 170.0]));
+    assert_eq!(ok(&mut a, "takeoff_list", json!({"doc":doc,"status":"excluded"}))["marks"][0]["label"], "MDP");
+
+    // A new status keeps the label and comment.
+    ok(&mut a, "takeoff_update", json!({"doc":doc,"page":1,"index":2,"status":"included_with_comments"}));
+    let updated = ok(&mut a, "takeoff_list", json!({"doc":doc}));
+    let m = &updated["marks"][1];
+    assert_eq!((m["status"].as_str(), m["label"].as_str(), m["comment"].as_str()), (Some("included_with_comments"), Some("MDP"), Some("by utility")));
+    // Marks are ordinary comments to everything else.
+    assert_eq!(ok(&mut a, "comment_list", json!({"doc":doc}))["count"], 2);
+
+    ok(&mut a, "doc_save", json!({"doc":doc,"path":"marked.pdf"}));
+    let reopened = ok(&mut a, "doc_open", json!({"path":"marked.pdf"}))["doc"].as_u64().unwrap();
+    assert_eq!(ok(&mut a, "takeoff_list", json!({"doc":reopened}))["marks"], updated["marks"]);
+    assert_eq!(ok(&mut a, "takeoff_export", json!({"doc":reopened,"out":"takeoff.csv"}))["count"], 2);
+    let csv = std::fs::read_to_string(dir.join("takeoff.csv")).unwrap();
+    assert!(csv.starts_with("Page,Sheet,Status,Label,Comment,Author\r\n"), "{csv}");
+    assert!(csv.contains(",Included w/ comments,MDP,by utility,Estimator\r\n"), "{csv}");
+    ok(&mut a, "takeoff_export", json!({"doc":reopened,"out":"takeoff.json"}));
+    let exported: Value = serde_json::from_str(&std::fs::read_to_string(dir.join("takeoff.json")).unwrap()).unwrap();
+    assert_eq!(exported["counts"], json!({"included":1,"included_with_comments":1,"excluded":0}));
+    assert!(a.call("takeoff_export", &json!({"doc":doc,"out":"../outside.csv"})).is_err());
+
+    // Bad arguments change nothing.
+    for args in [
+        json!({"doc":doc,"page":1,"rect":[10,10,10.5,40],"status":"included"}),
+        json!({"doc":doc,"page":1,"rect":[10,10,60,40],"status":"maybe"}),
+        json!({"doc":doc,"page":9,"rect":[10,10,60,40],"status":"included"}),
+    ] {
+        assert!(a.call("takeoff_add", &args).is_err(), "{args}");
+    }
+    assert!(a.call("takeoff_update", &json!({"doc":doc,"page":1,"index":7,"status":"excluded"})).is_err());
+    assert!(a.call("takeoff_update", &json!({"doc":doc,"page":1,"index":0})).is_err());
+    assert_eq!(ok(&mut a, "takeoff_list", json!({"doc":doc}))["count"], 2);
+    let _ = std::fs::remove_dir_all(dir);
+}
