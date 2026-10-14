@@ -200,6 +200,8 @@ fn scope_of(edit: &Edit) -> Scope {
         // A file attachment also changes the Attachments list.
         Edit::AddAnnotation(a) if matches!(a.shape, Shape::Attachment { .. }) => Scope::Full,
         Edit::AddMeasurement(_)
+        | Edit::AddTakeoffMark(_)
+        | Edit::UpdateTakeoffMark { .. }
         | Edit::AddAnnotation(_)
         | Edit::AddCustomStamp { .. }
         | Edit::DeleteAnnotation { .. }
@@ -496,6 +498,11 @@ impl Document {
     pub fn measurements(&self) -> Result<measure::Listing, String> {
         let e = self.editor.as_ref().ok_or("the document can't be read")?;
         Ok(measure::list(&e.cos))
+    }
+    /// Atlas takeoff marks: the status-coloured boxes an estimator drew over equipment.
+    pub fn takeoff_marks(&self) -> Result<pdfcraft_atlas::takeoff::Listing, String> {
+        let e = self.editor.as_ref().ok_or("the document can't be read")?;
+        Ok(pdfcraft_atlas::takeoff::list(&e.cos))
     }
     pub fn measurement_scale(&self, page: usize, at: measure::Point) -> Result<measure::Scale, String> {
         let e = self.editor.as_ref().ok_or("the document can't be read")?;
@@ -1183,6 +1190,14 @@ pub enum Edit {
     },
     /// Add a calibrated distance, perimeter or area annotation.
     AddMeasurement(measure::NewMeasurement),
+    /// Atlas: add a takeoff mark (a status-coloured box over equipment).
+    AddTakeoffMark(pdfcraft_atlas::takeoff::NewMark),
+    /// Atlas: change a takeoff mark's status, label and comment.
+    UpdateTakeoffMark {
+        page: usize,
+        index: usize,
+        text: pdfcraft_atlas::takeoff::MarkText,
+    },
     /// Store a drawing scale for a rectangular viewport (PDF user space).
     SetMeasurementScale {
         page: usize,
@@ -1782,6 +1797,8 @@ impl Edit {
                 pdfcraft_measure::Kind::Area => "Measure area",
             }),
             Edit::SetMeasurementScale { .. } => Label::of("Set measurement scale"),
+            Edit::AddTakeoffMark(_) => Label::of("Add takeoff mark"),
+            Edit::UpdateTakeoffMark { .. } => Label::of("Edit takeoff mark"),
             Edit::AddAnnotation(a) => Label::of(add_annotation(&a.shape)),
             Edit::AddCustomStamp { .. } => Label::of("Add stamp"),
             Edit::DeleteAnnotation { .. } => Label::of("Delete comment"),
@@ -1938,6 +1955,8 @@ fn check_permission(edit: &Edit, p: &pdfcraft_cos::Permissions) -> Result<(), Ed
             }
         }
         Edit::AddMeasurement(_)
+        | Edit::AddTakeoffMark(_)
+        | Edit::UpdateTakeoffMark { .. }
         | Edit::AddAnnotation(_)
         | Edit::AddCustomStamp { .. }
         | Edit::DeleteAnnotation { .. }
@@ -2159,6 +2178,10 @@ fn run_edit(doc: &mut pdfcraft_cos::Document, edit: &Edit, cx: &mut EditCtx) -> 
         Edit::AddMeasurement(m) => {
             measure::add(doc, m, &cx.meta())?;
         }
+        Edit::AddTakeoffMark(m) => {
+            pdfcraft_atlas::takeoff::add(doc, m, &cx.meta())?;
+        }
+        Edit::UpdateTakeoffMark { page, index, text } => pdfcraft_atlas::takeoff::update(doc, *page, *index, text, &cx.meta())?,
         Edit::SetMeasurementScale { page, bbox, name, scale } => measure::set_scale(doc, *page, *bbox, name, scale)?,
         Edit::AddAnnotation(a) => {
             pdfcraft_annot::add_annotation(doc, a, &cx.meta())?;
@@ -2623,6 +2646,8 @@ pub enum EditError {
     Comment(#[from] pdfcraft_annot::AnnotError),
     #[error(transparent)]
     Measure(#[from] measure::MeasureError),
+    #[error(transparent)]
+    Takeoff(#[from] pdfcraft_atlas::takeoff::TakeoffError),
     #[error("{0}")]
     Protection(String),
     #[error("the password is incorrect")]

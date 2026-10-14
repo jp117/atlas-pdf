@@ -4052,6 +4052,7 @@ dependencies = [
  "image",
  "pdfcraft-a11y",
  "pdfcraft-annot",
+ "pdfcraft-atlas",
  "pdfcraft-audit",
  "pdfcraft-compare",
  "pdfcraft-cos",

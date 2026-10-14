@@ -4523,3 +4523,41 @@ fn copy_image_finds_a_picture_inside_form_artwork_under_text() {
     assert_eq!(d.page_image_copy_file(0, 0).unwrap(), ("jpg", jpeg));
     assert!(d.page_image_copy_file(0, 1).is_err());
 }
+
+#[test]
+fn takeoff_marks_are_undoable_comment_edits() {
+    use pdfcraft_atlas::takeoff::{MarkText, NewMark, Status};
+    let mut session = Session::default();
+    let id = session.open("E-600.pdf", None, Arc::new(fixture(1)), None).unwrap();
+    let mark = NewMark {
+        page: 0,
+        rect: [10.0, 20.0, 110.0, 80.0],
+        status: Status::Included,
+        label: "MDP".into(),
+        comment: String::new(),
+        author: "Estimator".into(),
+    };
+    session.apply(id, Edit::AddTakeoffMark(mark.clone())).unwrap();
+    let marks = session.get(id).unwrap().takeoff_marks().unwrap().marks;
+    assert_eq!((marks.len(), marks[0].status, marks[0].label.as_str()), (1, Status::Included, "MDP"));
+
+    let excluded = MarkText { status: Status::Excluded, label: "MDP".into(), comment: "by utility".into() };
+    let update = Edit::UpdateTakeoffMark { page: 0, index: marks[0].index, text: excluded.clone() };
+    assert_eq!(update.label().wording, "Edit takeoff mark");
+    session.apply(id, update).unwrap();
+    let marks = session.get(id).unwrap().takeoff_marks().unwrap().marks;
+    assert_eq!((marks[0].status, marks[0].comment.as_str()), (Status::Excluded, "by utility"));
+
+    // A missing annotation is refused and leaves the document alone.
+    let before = session.get(id).unwrap().bytes.clone();
+    assert!(session.apply(id, Edit::UpdateTakeoffMark { page: 0, index: 9, text: excluded }).is_err());
+    assert_eq!(session.get(id).unwrap().bytes, before);
+
+    session.undo(id).unwrap();
+    assert_eq!(session.get(id).unwrap().takeoff_marks().unwrap().marks[0].status, Status::Included);
+    session.undo(id).unwrap();
+    assert!(session.get(id).unwrap().takeoff_marks().unwrap().marks.is_empty());
+
+    let p = pdfcraft_cos::Permissions { bits: 0, owner: false };
+    assert_eq!(check_permission(&Edit::AddTakeoffMark(mark), &p), Err(EditError::NotPermitted("comments")));
+}
