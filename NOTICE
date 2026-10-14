@@ -3,9 +3,12 @@ Copyright (c) 2026 ArtCraft Team and the PdfCraft contributors.
 Licensed under the MIT License or the Apache License, Version 2.0, at your option
 (LICENSE-MIT, LICENSE-APACHE).
 
-The ArtCraft name, wordmark and logos in docs/brand/ are trademarks of the ArtCraft Team. They are
-not open source and are not covered by the license above; their terms are in
-docs/brand/LICENSE-brand.txt.
+Atlas PDF
+Modifications copyright (c) 2026 Atlas Switch Co., Inc., under the same licenses. This is a
+modified version of PdfCraft: Atlas's code is in crates/atlas, crates/render/src/shx.rs,
+crates/ui-egui/src/atlas and crates/automation/src/atlas.rs, and every change to an upstream file
+is marked "Atlas fork". The ArtCraft name, wordmark and logos are trademarks of the ArtCraft Team;
+as their terms require of modified versions, this one does not include them.
 
 Third-party material
 
