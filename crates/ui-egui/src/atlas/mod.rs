@@ -5,12 +5,14 @@
 //! fork rebases cleanly. Strings are plain English on purpose: `tl!` literals would have to be
 //! added to every upstream translation catalogue.
 
+mod takeoff_panel;
 mod takeoff_tool;
 
 use crate::{PdfCraftApp, QuickTool};
 use pdfcraft_atlas::takeoff::{Listing, MarkText, Status};
 use pdfcraft_engine::{DocId, Document, Edit};
 
+pub(crate) use takeoff_panel::show as takeoff_panel;
 pub(crate) use takeoff_tool::page;
 
 /// Atlas's per-window state.
@@ -22,6 +24,8 @@ pub(crate) struct AtlasState {
     prompt: Option<takeoff_tool::Prompt>,
     /// The active document's marks, for its edit generation.
     listing: Option<(DocId, u64, Result<Listing, String>)>,
+    /// The Takeoff panel's filters and editor.
+    panel: takeoff_panel::PanelState,
 }
 
 impl AtlasState {
@@ -66,7 +70,35 @@ pub(crate) fn keys(app: &mut PdfCraftApp, i: usize, ctx: &egui::Context) {
         }
         return;
     }
+    pick_tool(app, status);
+}
+
+/// Pick a takeoff tool and show the Takeoff panel beside the drawing.
+fn pick_tool(app: &mut PdfCraftApp, status: Status) {
     app.quick_tool = QuickTool::Takeoff(status);
+    open_panel(app);
+}
+
+/// Show the Takeoff panel. The first time it shares the Inspector's place as a tab rather than
+/// halving the drawing; after that it comes back wherever it was last put.
+fn open_panel(app: &mut PdfCraftApp) {
+    use crate::docking::Panel;
+    use serde_json::json;
+    if app.docking.layout.contains(&Panel::Takeoff) {
+        return;
+    }
+    let first_time = !app.docking.hidden.iter().any(|(panel, _)| *panel == Panel::Takeoff);
+    let mut steps = vec![json!({"operation": "open", "panel": "takeoff"})];
+    if first_time && app.docking.layout.contains(&Panel::Inspector) {
+        steps.push(json!({"operation": "move", "panel": "takeoff", "target": "inspector", "zone": "center", "before": "inspector"}));
+        steps.push(json!({"operation": "activate", "panel": "takeoff"}));
+    }
+    for step in steps {
+        if let Err(error) = crate::docking::command(app, false, &step) {
+            app.notify(error);
+            return;
+        }
+    }
 }
 
 /// The edit that gives the selected takeoff mark `status`, keeping its label and comment.
@@ -90,9 +122,18 @@ pub(crate) fn menu(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
         let text = egui::RichText::new(format!("■  {}", status.label())).color(takeoff_tool::color(status));
         let button = egui::Button::new(text).shortcut_text(status.hotkey().to_string()).selected(app.quick_tool == QuickTool::Takeoff(status));
         if ui.add_enabled(app.active.is_some(), button).clicked() {
-            app.quick_tool = QuickTool::Takeoff(status);
+            pick_tool(app, status);
             ui.close();
         }
+    }
+    ui.separator();
+    if ui.button("Takeoff panel").clicked() {
+        open_panel(app);
+        ui.close();
+    }
+    if ui.add_enabled(app.active.is_some(), egui::Button::new("Export takeoff as CSV…")).clicked() {
+        takeoff_panel::export_csv(app);
+        ui.close();
     }
 }
 
