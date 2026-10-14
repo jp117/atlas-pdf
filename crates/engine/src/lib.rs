@@ -2510,6 +2510,8 @@ fn run_edit(doc: &mut pdfcraft_cos::Document, edit: &Edit, cx: &mut EditCtx) -> 
 fn comment_list(doc: &pdfcraft_cos::Document) -> Vec<pdfcraft_render::Annotation> {
     pdfcraft_annot::summaries(doc)
         .into_iter()
+        // Atlas fork: AutoCAD SHX text is drawing text, not comments (as at open).
+        .filter(|s| !s.author.as_deref().is_some_and(pdfcraft_render::shx::is_shx_author))
         .map(|s| pdfcraft_render::Annotation {
             page: s.page,
             subtype: s.subtype,

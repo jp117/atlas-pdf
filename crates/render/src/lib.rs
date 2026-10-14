@@ -12,6 +12,8 @@ mod inspect;
 mod pixels;
 mod raster;
 mod reading;
+// Atlas fork: AutoCAD SHX text is drawing text, not comments.
+pub mod shx;
 mod structure;
 pub mod text;
 

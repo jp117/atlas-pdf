@@ -781,6 +781,7 @@ pub(crate) fn extract_page(pdf: &Pdf, page: usize, settings: &InterpreterSetting
     for f in extra {
         emit(&mut text, &f.ids, &f.line_of, &f.space_before, None);
     }
+    crate::shx::append_page_text(&mut text, p, initial);
     Some(text)
 }
 

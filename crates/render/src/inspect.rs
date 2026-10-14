@@ -948,6 +948,11 @@ impl<'a> Inspector<'a> {
                 {
                     continue;
                 }
+                // Atlas fork: AutoCAD's SHX text annotations are drawing text (searchable
+                // through `crate::shx`), not comments.
+                if self.text(d, b"T").is_some_and(|t| crate::shx::is_shx_author(&t)) {
+                    continue;
+                }
                 let rect = rect4(self.resolve(d.get(b"Rect").unwrap_or(&Object::Null)));
                 let mut color = match d.get(b"C").map(|o| self.resolve(o)) {
                     Ok(Object::Array(c)) if c.len() == 3 => {
