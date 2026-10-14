@@ -8,7 +8,7 @@
 # "Open with Atlas PDF" entry on PDFs, and registers Atlas PDF with Windows' Default Programs
 # (a ProgID, OpenWithProgids, Capabilities and RegisteredApplications, as PdfCraft's installer
 # does). Windows does not let a program make itself the default: this only offers Atlas PDF,
-# and the script opens Settings so you can choose it. Your settings (%APPDATA%\AtlasPDF) are
+# and a first install opens Settings so you can choose it. Your settings (%APPDATA%\AtlasPDF) are
 # left alone by -Uninstall.
 
 param(
@@ -106,6 +106,7 @@ if (Test-Path (Join-Path $models '*.rten')) {
 }
 
 # Default Programs registration. The document icon is resource 2 of the executable (build.rs).
+$firstInstall = -not (Test-Path $Capabilities)
 $open = "`"$Exe`" `"%1`""
 Set-Default "$Classes\$ProgId" 'PDF Document'
 Set-Default "$Classes\$ProgId\DefaultIcon" "`"$Exe`",-2"
@@ -140,5 +141,8 @@ $link.Save()
 
 Send-AssociationChanged
 Write-Host "Installed $Name in $Dest."
-Write-Host 'To make it the default for PDFs: in the Settings page that opens, set .pdf to Atlas PDF.'
-Start-Process 'ms-settings:defaultapps?registeredAppUser=Atlas%20PDF'
+# Only a first install asks about the PDF default; an update keeps whatever the user chose.
+if ($firstInstall) {
+    Write-Host 'To make it the default for PDFs: in the Settings page that opens, set .pdf to Atlas PDF.'
+    Start-Process 'ms-settings:defaultapps?registeredAppUser=Atlas%20PDF'
+}
