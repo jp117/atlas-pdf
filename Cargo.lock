@@ -3921,6 +3921,13 @@ dependencies = [
 [[package]]
 name = "pdfcraft-atlas"
 version = "0.7.1"
+dependencies = [
+ "pdfcraft-annot",
+ "pdfcraft-cos",
+ "pdfcraft-model",
+ "serde",
+ "thiserror 2.0.21",
+]
 
 [[package]]
 name = "pdfcraft-audit"

@@ -9,3 +9,8 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+pdfcraft-cos = { workspace = true }
+pdfcraft-model = { workspace = true }
+pdfcraft-annot = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
