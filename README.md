@@ -118,16 +118,20 @@ Rules for Atlas code:
 - **Clean-room.** Never look inside Adobe Acrobat's install folder or reverse engineer it.
   Behaviour comes from ISO 32000, public documentation and the drawings themselves.
 
-### Syncing with upstream
+### Taking changes from upstream
+
+Our `main` is Atlas PDF's own line of development, not a copy of PdfCraft. PdfCraft is a
+fetch-only `upstream` remote that we take changes from when they don't conflict with Atlas work:
 
 ```sh
 git fetch upstream
-git merge upstream/main     # merge, don't rebase: main is shared
+git merge-tree --write-tree --name-only main upstream/main   # exit 0: merges cleanly; otherwise lists the conflicts
+git merge upstream/main                                       # only when it merges cleanly
 ```
 
-Read every conflicted hunk. Each Atlas hook is small and marked, so it should be quick to
-re-apply. Keep this README (upstream's is PdfCraft's), then run the quality gates on the touched
-crates and `cargo test -p pdfcraft-ui-egui` before pushing.
+When a merge would conflict, leave it. To take one particular fix whose commit applies cleanly,
+use `git cherry-pick <commit>`. After taking anything from upstream, run the quality gates on the
+crates it touched and `cargo test -p pdfcraft-ui-egui` before pushing.
 
 ## Next
 
