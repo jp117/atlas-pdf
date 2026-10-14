@@ -7,9 +7,13 @@
 //!
 //! ```text
 //! /Subtype /Square  /Subj (Atlas Takeoff: Included)  /C [0 0.62 0.24]  /BS << /W 3 /S /S >>
+//! /IC [0 0.62 0.24]  /ca 0.2
 //! /Contents (LP-1: provide feed-through lugs)
 //! /AtlasTakeoff << /Status /Included /Label (LP-1) /Comment (provide feed-through lugs) >>
 //! ```
+//!
+//! The fill is the status colour at [`FILL_OPACITY`] (PDF 2.0's `/ca`, the opacity of fills) inside
+//! a solid border, so the equipment under a box stays readable.
 //!
 //! `/Contents` is a readable summary that every Atlas edit rewrites. When another program has
 //! changed it, the changed text is taken as the comment. A Square annotation without the private
@@ -96,6 +100,8 @@ impl Status {
 
 /// Border width of a mark, in points: heavy enough to read on a busy sheet at any zoom.
 pub const BORDER_WIDTH: f64 = 3.0;
+/// Opacity of a mark's fill: a tint that leaves the equipment under it readable.
+pub const FILL_OPACITY: f64 = 0.2;
 /// The longest label, comment or author accepted, in bytes.
 pub const MAX_TEXT: usize = 4096;
 const MAX_ANNOTATIONS: usize = 200_000;
@@ -113,10 +119,10 @@ fn invalid(s: &str) -> TakeoffError {
     TakeoffError::Invalid(s.into())
 }
 
-/// The style every mark of a status is drawn with: a solid border, no fill, so the equipment
-/// under it stays readable.
+/// The style every mark of a status is drawn with: a solid border filled with the same colour.
+/// The fill is see-through only once [`write_fields`] adds `/ca`.
 pub fn style(status: Status) -> Style {
-    Style { color: status.color(), opacity: 1.0, width: BORDER_WIDTH, fill: None }
+    Style { color: status.color(), opacity: 1.0, width: BORDER_WIDTH, fill: Some(status.color()) }
 }
 
 /// A mark to add.
@@ -213,11 +219,14 @@ fn annot(doc: &Document, page: usize, index: usize) -> Result<(ObjRef, Dict)> {
     Ok((r, d))
 }
 
-/// Write the Atlas fields: subject, colour, summary and the private dictionary.
+/// Write the Atlas fields: subject, colours, summary and the private dictionary.
 fn write_fields(d: &mut Dict, status: Status, label: &str, comment: &str) {
     let [r, g, b] = status.color();
+    let colour = || Object::Array(vec![Object::Real(r), Object::Real(g), Object::Real(b)]);
     d.set(b"Subj".to_vec(), PdfString::text(status.subject()));
-    d.set(b"C".to_vec(), Object::Array(vec![Object::Real(r), Object::Real(g), Object::Real(b)]));
+    d.set(b"C".to_vec(), colour());
+    d.set(b"IC".to_vec(), colour());
+    d.set(b"ca".to_vec(), Object::Real(FILL_OPACITY));
     d.set(b"Contents".to_vec(), PdfString::text(&summary(label, comment)));
     let mut private = Dict::new();
     private.set(b"Status".to_vec(), Object::name(status.pdf_name()));
@@ -411,7 +420,11 @@ mod tests {
         assert_eq!(text(&d, b"Contents"), "T-1: by others");
         assert_eq!(text(&d, b"T"), "Estimator");
         assert!(d.get(b"AP").is_some(), "has an appearance stream");
-        assert!(d.get(b"IC").is_none(), "no fill hides the equipment");
+        // A see-through fill in the status colour: the equipment under the box stays readable.
+        let colour = |key: &[u8]| -> Vec<f64> { d.get(key).unwrap().as_array().unwrap().iter().map(|o| o.as_f64().unwrap()).collect() };
+        assert_eq!(colour(b"IC"), Status::Excluded.color().to_vec());
+        assert_eq!(d.get(b"ca").and_then(Object::as_f64), Some(FILL_OPACITY));
+        assert!(d.get(b"CA").is_none(), "the border stays solid");
     }
 
     #[test]
@@ -425,8 +438,10 @@ mod tests {
         let m = &list(&reopened).marks[0];
         assert_eq!((m.status, m.comment.as_str(), m.id.as_str()), (Status::IncludedWithComments, "NEMA 3R", "u"));
         let (_, d) = annot(&reopened, 0, index).unwrap();
-        let c: Vec<f64> = d.get(b"C").unwrap().as_array().unwrap().iter().map(|o| o.as_f64().unwrap()).collect();
-        assert_eq!(c, Status::IncludedWithComments.color().to_vec());
+        for key in [&b"C"[..], b"IC"] {
+            let c: Vec<f64> = d.get(key).unwrap().as_array().unwrap().iter().map(|o| o.as_f64().unwrap()).collect();
+            assert_eq!(c, Status::IncludedWithComments.color().to_vec(), "{}", String::from_utf8_lossy(key));
+        }
     }
 
     #[test]
