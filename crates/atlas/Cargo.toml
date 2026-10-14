@@ -1,0 +1,11 @@
+[package]
+name = "pdfcraft-atlas"
+description = "Atlas Switch construction-drawing logic: layer grouping, takeoff marks, SHX text"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]

@@ -3919,6 +3919,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "pdfcraft-atlas"
+version = "0.7.1"
+
+[[package]]
 name = "pdfcraft-audit"
 version = "0.7.1"
 dependencies = [
