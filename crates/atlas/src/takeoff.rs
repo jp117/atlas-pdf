@@ -30,7 +30,7 @@ use serde::Serialize;
 pub enum Status {
     /// Green: in Atlas's scope.
     Included,
-    /// Yellow: in scope, with a note (a clarification, an exception, a question).
+    /// Yellow: in scope, with comments, which are written on the quote rather than on the box.
     IncludedWithComments,
     /// Red: not in Atlas's scope.
     Excluded,
@@ -81,11 +81,6 @@ impl Status {
             Status::IncludedWithComments => [1.0, 0.76, 0.0],
             Status::Excluded => [0.89, 0.13, 0.13],
         }
-    }
-
-    /// Whether drawing this mark should ask for a comment straight away.
-    pub fn wants_comment(self) -> bool {
-        self == Status::IncludedWithComments
     }
 
     /// The key that picks this tool: 1, 2, 3.

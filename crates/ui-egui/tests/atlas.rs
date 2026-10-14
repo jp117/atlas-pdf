@@ -68,3 +68,29 @@ fn keys_re_mark_the_selected_box_in_box_mode_and_delete_removes_it() {
     h.run_steps(3);
     assert!(marks(&h).is_empty());
 }
+
+/// Comments belong to the quote, not to boxes: a yellow box goes on in one drag, like the others.
+#[test]
+fn a_yellow_box_is_added_in_one_drag_without_a_comment_prompt() {
+    use egui::{Event, PointerButton, pos2};
+    let mut h = harness();
+    h.state_mut().quick_tool = QuickTool::Takeoff(Status::IncludedWithComments);
+    h.run_steps(2);
+    let id = h.state().views[0].id;
+    let (from, to) = (pos2(640.0, 420.0), pos2(700.0, 470.0));
+    let button = |pos, pressed| Event::PointerButton { pos, button: PointerButton::Primary, pressed, modifiers: Default::default() };
+    h.event(Event::PointerMoved(from));
+    h.run_steps(1);
+    h.event(button(from, true));
+    h.run_steps(1);
+    for k in 1..=8 {
+        h.event(Event::PointerMoved(from + (to - from) * (k as f32 / 8.0)));
+        h.run_steps(1);
+    }
+    h.event(button(to, false));
+    h.run_steps(4);
+    let marks = h.state().session.get(id).unwrap().takeoff_marks().unwrap().marks;
+    assert_eq!(marks.len(), 1, "the box is added straight away");
+    assert_eq!((marks[0].status, marks[0].comment.as_str()), (Status::IncludedWithComments, ""));
+    assert!(h.query_by_label("Comment").is_none(), "no comment prompt");
+}

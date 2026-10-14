@@ -1,13 +1,13 @@
 //! The takeoff tools: drag a box over equipment to mark it Included (green), Included w/ comments
 //! (yellow) or Excluded (red). The box is labelled with the text inside it (SHX text included), so
-//! "LP-1" or "1600A D.S.#1" comes along for free. A yellow box asks for its comment first.
-//! Clicking a box (without dragging) selects it, for Delete or a 1/2/3 re-mark.
+//! "LP-1" or "1600A D.S.#1" comes along for free. Comments belong to the quote, not to boxes, so
+//! every box is drawn in one drag, yellow included. Clicking a box (without dragging) selects it, for Delete or a 1/2/3 re-mark.
 
 use super::AtlasState;
 use crate::QuickTool;
 use crate::canvas::{DocView, PageXform};
 use egui::{Color32, Pos2, Rect, Stroke};
-use pdfcraft_atlas::takeoff::{MAX_TEXT, Mark, NewMark, Status};
+use pdfcraft_atlas::takeoff::{Mark, NewMark, Status};
 use pdfcraft_engine::{DocId, Document, Edit};
 use pdfcraft_render::text::PageText;
 
@@ -17,14 +17,6 @@ pub(crate) struct Drag {
     page: usize,
     start: [f32; 2],
     end: [f32; 2],
-}
-
-/// A yellow box waiting for its comment.
-pub(crate) struct Prompt {
-    doc: DocId,
-    mark: NewMark,
-    /// Focus the comment field on the next frame it is shown.
-    focus: bool,
 }
 
 /// The smallest box, in screen pixels, that counts as a drag rather than a stray click.
@@ -38,7 +30,7 @@ pub(crate) fn color(status: Status) -> Color32 {
     Color32::from_rgb(c(r), c(g), c(b))
 }
 
-/// One page's takeoff input and overlay; called for every visible page.
+/// One page's takeoff input; called for every visible page.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn page(
     ui: &egui::Ui,
@@ -54,7 +46,6 @@ pub(crate) fn page(
     if let QuickTool::Takeoff(status) = tool {
         draw_input(ui, resp, doc, view, xf, page, state, status, author);
     }
-    prompt(ui, doc, view, xf, page, state);
 }
 
 fn screen(xf: &PageXform, v: [f32; 2]) -> Pos2 {
@@ -101,10 +92,6 @@ fn draw_input(
     if resp.drag_started()
         && let Some(origin) = ui.input(|i| i.pointer.press_origin()).filter(|p| xf.rect.contains(*p))
     {
-        // Starting another box keeps the yellow one waiting for a comment, as it stands.
-        if let Some(waiting) = state.prompt.take() {
-            view.pending_edit = Some(Edit::AddTakeoffMark(waiting.mark));
-        }
         let (x, y) = xf.screen_to_view(origin);
         state.drag = Some(Drag { doc: id, page, start: [x, y], end: [x, y] });
     }
@@ -132,11 +119,7 @@ fn draw_input(
     let rect = [f64::from(a[0].min(b[0])), f64::from(a[1].min(b[1])), f64::from(a[0].max(b[0])), f64::from(a[1].max(b[1]))];
     let label = view.page_text(page).map(|t| label_inside(&t, boxed)).unwrap_or_default();
     let mark = NewMark { page, rect, status, label, comment: String::new(), author: author.to_owned() };
-    if status.wants_comment() {
-        state.prompt = Some(Prompt { doc: id, mark, focus: true });
-    } else {
-        view.pending_edit = Some(Edit::AddTakeoffMark(mark));
-    }
+    view.pending_edit = Some(Edit::AddTakeoffMark(mark));
 }
 
 /// The `/Annots` index of the takeoff mark on `page` under the user-space point (x, y): the
@@ -158,54 +141,6 @@ fn label_inside(text: &PageText, rect: [f32; 4]) -> String {
         label.truncate(cut);
     }
     label
-}
-
-/// The comment prompt beside a yellow box, on the page it belongs to.
-fn prompt(ui: &egui::Ui, doc: &Document, view: &mut DocView, xf: &PageXform, page: usize, state: &mut AtlasState) {
-    let Some(waiting) = state.prompt.as_mut().filter(|p| p.doc == view.id && p.mark.page == page) else { return };
-    let Some(info) = doc.info.pages.get(page) else { return };
-    // Opposite corners stay opposite on a rotated page.
-    let [x0, y0, x1, y1] = waiting.mark.rect;
-    let [a, b] = [[x0, y0], [x1, y1]].map(|[x, y]| screen(xf, info.user_to_view(x as f32, y as f32)));
-    let boxed = Rect::from_two_pos(a, b);
-    let status = waiting.mark.status;
-    ui.painter().rect_stroke(boxed, 0.0, Stroke::new(2.0, color(status)), egui::StrokeKind::Middle);
-    let mut commit = false;
-    let mut cancel = false;
-    egui::Window::new(egui::RichText::new(status.label()).color(color(status)).strong())
-        .id(egui::Id::new("atlas-takeoff-comment"))
-        .fixed_pos(boxed.right_top() + egui::vec2(8.0, 0.0))
-        .collapsible(false)
-        .resizable(false)
-        .show(ui.ctx(), |ui| {
-            ui.label("Label");
-            ui.add(egui::TextEdit::singleline(&mut waiting.mark.label).desired_width(280.0).char_limit(MAX_TEXT));
-            ui.label("Comment");
-            let field = ui.add(
-                egui::TextEdit::singleline(&mut waiting.mark.comment)
-                    .desired_width(280.0)
-                    .char_limit(MAX_TEXT)
-                    .hint_text("What's included, excluded or assumed"),
-            );
-            if std::mem::take(&mut waiting.focus) {
-                field.request_focus();
-            }
-            if field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                commit = true;
-            }
-            if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-                cancel = true;
-            }
-            ui.horizontal(|ui| {
-                commit |= ui.button("Add  (Enter)").clicked();
-                cancel |= ui.button("Cancel  (Esc)").clicked();
-            });
-        });
-    if commit && let Some(done) = state.prompt.take() {
-        view.pending_edit = Some(Edit::AddTakeoffMark(done.mark));
-    } else if cancel {
-        state.prompt = None;
-    }
 }
 
 #[cfg(test)]

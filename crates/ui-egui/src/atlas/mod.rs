@@ -22,8 +22,6 @@ pub(crate) use takeoff_tool::page;
 pub(crate) struct AtlasState {
     /// The takeoff box being dragged.
     drag: Option<takeoff_tool::Drag>,
-    /// A yellow box waiting for its comment.
-    prompt: Option<takeoff_tool::Prompt>,
     /// The active document's marks, for its edit generation.
     listing: Option<(DocId, u64, Result<Listing, String>)>,
     /// The Takeoff panel's filters and editor.
