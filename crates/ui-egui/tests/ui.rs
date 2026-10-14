@@ -34,7 +34,7 @@ fn harness(setup: impl FnOnce(&mut PdfCraftApp) + 'static) -> Harness<'static, P
 #[test]
 fn home_shows_welcome_and_tools() {
     let h = harness(|_| {});
-    h.get_by_label_contains("Welcome to PdfCraft");
+    h.get_by_label_contains("Welcome to Atlas PDF");
     assert!(h.query_all_by_label("Organize pages").count() >= 2, "tool list + home card");
     h.get_by_label("Open file");
 }
@@ -1064,7 +1064,7 @@ fn closing_the_last_active_tab_selects_the_previous_one_then_home() {
         assert!(app.session.get(ids[removed]).is_none());
     }
     assert_eq!(h.state().active, None);
-    h.get_by_label_contains("Welcome to PdfCraft");
+    h.get_by_label_contains("Welcome to Atlas PDF");
 }
 
 #[test]

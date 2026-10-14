@@ -12,7 +12,8 @@ use serde_json::{Value, json};
 use crate::{Args, Automation, Content, DEFAULT_DPI, MAX_DPI, Result, ToolError, encode_png, failed};
 
 /// Author used when a tool call names none.
-pub(crate) const DEFAULT_AUTHOR: &str = "PdfCraft";
+// Atlas fork: comments an agent adds are signed with the app's own name.
+pub(crate) const DEFAULT_AUTHOR: &str = "Atlas PDF";
 
 pub(crate) fn parse_color(s: &str) -> Result<Rgb> {
     let named = match s.to_ascii_lowercase().as_str() {

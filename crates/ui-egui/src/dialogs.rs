@@ -1097,7 +1097,9 @@ fn dialogs(app: &mut PdfCraftApp, ctx: &egui::Context) {
                     _ => {
                         ui.horizontal(|ui| {
                             ui.vertical(|ui| {
-                                ui.label(egui::RichText::new("PdfCraft").font(theme::semibold(20.0)));
+                                ui.label(egui::RichText::new(pdfcraft_atlas::brand::APP_NAME).font(theme::semibold(20.0)));
+                                // Atlas fork: credit the project the app is built on.
+                                ui.label(egui::RichText::new("Built on PdfCraft").color(t.text_muted));
                                 ui.label(crate::i18n::fmt(tl!("Version {v}"), &[("v", &pdfcraft_engine::build_info::version())]));
                             });
                         });
