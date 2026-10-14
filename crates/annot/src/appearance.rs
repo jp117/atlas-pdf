@@ -232,8 +232,8 @@ pub fn parse_da(d: &Dict) -> (Rgb, f64) {
     (col.map(|x| x.clamp(0.0, 1.0)), size.min(400.0))
 }
 
-fn ext_gstate(opacity: f64, multiply: bool) -> Option<Dict> {
-    if opacity >= 1.0 && !multiply {
+fn ext_gstate(opacity: f64, fill_opacity: f64, multiply: bool) -> Option<Dict> {
+    if opacity >= 1.0 && fill_opacity >= 1.0 && !multiply {
         return None;
     }
     let mut gs = Dict::new();
@@ -242,7 +242,7 @@ fn ext_gstate(opacity: f64, multiply: bool) -> Option<Dict> {
         gs.set(b"BM".to_vec(), Object::name("Multiply"));
     }
     gs.set(b"CA".to_vec(), Object::Real(opacity));
-    gs.set(b"ca".to_vec(), Object::Real(opacity));
+    gs.set(b"ca".to_vec(), Object::Real(fill_opacity));
     let mut res = Dict::new();
     res.set(b"GS0".to_vec(), Object::Dict(gs));
     Some(res)
@@ -305,12 +305,15 @@ pub fn build(d: &Dict) -> Option<Stream> {
         return None;
     }
     let opacity = d.get(b"CA").and_then(|o| o.as_f64()).unwrap_or(1.0).clamp(0.0, 1.0);
+    // Atlas fork: PDF 2.0's /ca, the opacity of fills, which defaults to /CA. A see-through fill
+    // inside a solid border (takeoff boxes) needs the two apart.
+    let fill_opacity = d.get(b"ca").and_then(|o| o.as_f64()).filter(|v| v.is_finite()).map_or(opacity, |v| v.clamp(0.0, 1.0));
     let stroke = color(d, b"C")?;
     let w = border_width(d);
     let mut res = Dict::new();
     let mut c = String::new();
     let markup = matches!(subtype.as_slice(), b"Highlight" | b"Underline" | b"StrikeOut" | b"Squiggly");
-    if let Some(gs) = ext_gstate(opacity, subtype == b"Highlight") {
+    if let Some(gs) = ext_gstate(opacity, fill_opacity, subtype == b"Highlight") {
         res.set(b"ExtGState".to_vec(), Object::Dict(gs));
         c.push_str("/GS0 gs\n");
     }

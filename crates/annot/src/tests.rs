@@ -1273,3 +1273,34 @@ fn cached_appearances_are_reused_while_annotations_are_unchanged() {
     assert!(!a.is_empty());
     assert_eq!(a, b, "the reused appearance is byte-identical");
 }
+
+/// Atlas fork: PDF 2.0's /ca sets the opacity of fills apart from the border's /CA, and
+/// defaults to /CA, so annotations without it are drawn as before.
+#[test]
+fn fill_opacity_is_separate_from_the_border_when_ca_is_set() {
+    let gs0 = |doc: &Document, d: &Dict| {
+        let ap = d.get(b"AP").unwrap().as_dict().unwrap().reference(b"N").unwrap();
+        let res = doc.get(ap).as_dict().unwrap().get(b"Resources").cloned().unwrap();
+        let gs = res.as_dict().unwrap().get(b"ExtGState").unwrap().as_dict().unwrap().get(b"GS0").unwrap().as_dict().unwrap().clone();
+        (gs.get(b"CA").and_then(Object::as_f64), gs.get(b"ca").and_then(Object::as_f64))
+    };
+    let mut doc = fixture();
+    let mut boxed = new(0, Shape::Rectangle { rect: [100.0, 100.0, 200.0, 160.0] });
+    boxed.style.fill = Some([0.0, 0.62, 0.24]);
+    let index = add_annotation(&mut doc, &boxed, &meta("tinted")).unwrap();
+    let r = annots(&doc, page_refs(&doc).unwrap()[0])[index].as_ref().unwrap();
+    doc.update_dict(r, |d| d.set(b"ca".to_vec(), Object::Real(0.2))).unwrap();
+    set_appearance(&mut doc, r).unwrap();
+    let doc = reopen(&doc);
+    let d = list(&doc, 0)[index].clone();
+    assert_eq!(gs0(&doc, &d), (Some(1.0), Some(0.2)), "solid border, see-through fill");
+    assert!(ap_content(&doc, &d).contains("B\n"), "filled and stroked");
+
+    // Without /ca, the fill follows /CA as before.
+    let mut doc = fixture();
+    let mut faded = new(0, Shape::Rectangle { rect: [100.0, 100.0, 200.0, 160.0] });
+    faded.style.opacity = 0.5;
+    let index = add_annotation(&mut doc, &faded, &meta("faded")).unwrap();
+    let d = list(&reopen(&doc), 0)[index].clone();
+    assert_eq!(gs0(&reopen(&doc), &d), (Some(0.5), Some(0.5)));
+}
