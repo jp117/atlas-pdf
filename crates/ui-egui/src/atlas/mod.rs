@@ -54,7 +54,7 @@ fn digit(status: Status) -> egui::Key {
     }
 }
 
-/// 1, 2 and 3: with the Select tool and a takeoff mark selected, re-mark it with that status;
+/// 1, 2 and 3: with a takeoff mark selected (by any tool), re-mark it with that status;
 /// otherwise pick that takeoff tool. Plain digits, so only when nothing else has the keyboard
 /// (the same rule as the V and H tool keys).
 pub(crate) fn keys(app: &mut PdfCraftApp, i: usize, ctx: &egui::Context) {
@@ -64,9 +64,7 @@ pub(crate) fn keys(app: &mut PdfCraftApp, i: usize, ctx: &egui::Context) {
         return;
     }
     let Some(status) = Status::ALL.into_iter().find(|s| ctx.input(|input| input.key_pressed(digit(*s)))) else { return };
-    if app.quick_tool == QuickTool::Select
-        && let Some(edit) = restatus_selected(app, i, status)
-    {
+    if let Some(edit) = restatus_selected(app, i, status) {
         if let Some(view) = app.views.get_mut(i) {
             view.pending_edit = Some(edit);
         }

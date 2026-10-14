@@ -1,12 +1,13 @@
 //! The takeoff tools: drag a box over equipment to mark it Included (green), Included w/ comments
 //! (yellow) or Excluded (red). The box is labelled with the text inside it (SHX text included), so
 //! "LP-1" or "1600A D.S.#1" comes along for free. A yellow box asks for its comment first.
+//! Clicking a box (without dragging) selects it, for Delete or a 1/2/3 re-mark.
 
 use super::AtlasState;
 use crate::QuickTool;
 use crate::canvas::{DocView, PageXform};
 use egui::{Color32, Pos2, Rect, Stroke};
-use pdfcraft_atlas::takeoff::{MAX_TEXT, NewMark, Status};
+use pdfcraft_atlas::takeoff::{MAX_TEXT, Mark, NewMark, Status};
 use pdfcraft_engine::{DocId, Document, Edit};
 use pdfcraft_render::text::PageText;
 
@@ -80,10 +81,23 @@ fn draw_input(
         }
         return;
     }
-    if over {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
-    }
     let id = view.id;
+    // The box under the pointer, if any: a click selects it.
+    let pointer = ui.input(|i| i.pointer.hover_pos()).filter(|p| xf.rect.contains(*p));
+    let hit = pointer.and_then(|p| {
+        let (vx, vy) = xf.screen_to_view(p);
+        let [x, y] = info.view_to_user(vx, vy);
+        let marks = state.listing(id, doc).map(|l| l.marks.as_slice()).unwrap_or_default();
+        mark_at(marks, page, f64::from(x), f64::from(y))
+    });
+    if over {
+        let dragging = state.drag.as_ref().is_some_and(|d| d.doc == id && d.page == page);
+        let cursor = if hit.is_some() && !dragging { egui::CursorIcon::PointingHand } else { egui::CursorIcon::Crosshair };
+        ui.ctx().set_cursor_icon(cursor);
+    }
+    if resp.clicked() && pointer.is_some() {
+        view.comments.selected = hit.map(|index| (page, index));
+    }
     if resp.drag_started()
         && let Some(origin) = ui.input(|i| i.pointer.press_origin()).filter(|p| xf.rect.contains(*p))
     {
@@ -123,6 +137,17 @@ fn draw_input(
     } else {
         view.pending_edit = Some(Edit::AddTakeoffMark(mark));
     }
+}
+
+/// The `/Annots` index of the takeoff mark on `page` under the user-space point (x, y): the
+/// smallest one containing it, so a box drawn inside a bigger box can still be picked.
+fn mark_at(marks: &[Mark], page: usize, x: f64, y: f64) -> Option<usize> {
+    let area = |m: &Mark| (m.rect[2] - m.rect[0]) * (m.rect[3] - m.rect[1]);
+    marks
+        .iter()
+        .filter(|m| m.page == page && m.rect[0] <= x && x <= m.rect[2] && m.rect[1] <= y && y <= m.rect[3])
+        .min_by(|a, b| area(a).total_cmp(&area(b)))
+        .map(|m| m.index)
 }
 
 /// The text inside `rect` (view space) on one line, for a mark's label.
@@ -204,6 +229,27 @@ mod tests {
         assert_eq!(label_inside(&text, [0.0, 0.0, 100.0, 30.0]), "LP-1 MDP");
         assert_eq!(label_inside(&text, [0.0, 0.0, 19.0, 30.0]), "LP-1");
         assert_eq!(label_inside(&text, [500.0, 0.0, 600.0, 30.0]), "");
+    }
+
+    #[test]
+    fn a_click_picks_the_smallest_box_under_it_on_its_page() {
+        let mark = |page: usize, index: usize, rect: [f64; 4]| Mark {
+            page,
+            index,
+            id: String::new(),
+            status: Status::Included,
+            label: String::new(),
+            comment: String::new(),
+            author: String::new(),
+            rect,
+        };
+        let marks = [mark(0, 3, [0.0, 0.0, 100.0, 100.0]), mark(0, 7, [40.0, 40.0, 60.0, 60.0]), mark(1, 2, [0.0, 0.0, 500.0, 500.0])];
+        assert_eq!(mark_at(&marks, 0, 50.0, 50.0), Some(7), "the inner box");
+        assert_eq!(mark_at(&marks, 0, 10.0, 10.0), Some(3), "the outer box");
+        assert_eq!(mark_at(&marks, 0, 100.0, 100.0), Some(3), "edges count");
+        assert_eq!(mark_at(&marks, 0, 150.0, 10.0), None, "outside every box");
+        assert_eq!(mark_at(&marks, 1, 50.0, 50.0), Some(2), "only this page's boxes");
+        assert_eq!(mark_at(&[], 0, 1.0, 1.0), None);
     }
 
     #[test]

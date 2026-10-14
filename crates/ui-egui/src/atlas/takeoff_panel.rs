@@ -82,7 +82,7 @@ fn body(app: &mut PdfCraftApp, ui: &mut egui::Ui) -> Option<Action> {
     if !can_edit {
         ui.label(RichText::new("This document's security settings don't allow comments.").weak());
     }
-    ui.label(RichText::new("Drag a box over equipment. 1, 2, 3 pick the tool; with Select, they re-mark the selected box.").small().weak());
+    ui.label(RichText::new("Drag a box over equipment; click a box to select it. 1, 2, 3 re-mark the selected box (or pick the tool when none is selected); Delete removes it.").small().weak());
     if listing.truncated {
         ui.label(RichText::new("This document has too many annotations; only the first are listed.").weak());
     }

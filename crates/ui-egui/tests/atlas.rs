@@ -27,3 +27,44 @@ fn the_tool_strip_has_a_button_per_takeoff_status() {
         assert_eq!(h.state().quick_tool, QuickTool::Takeoff(status), "{status:?}");
     }
 }
+
+#[test]
+fn keys_re_mark_the_selected_box_in_box_mode_and_delete_removes_it() {
+    use pdfcraft_atlas::takeoff::NewMark;
+    use pdfcraft_engine::Edit;
+    let mut h = harness();
+    let id = h.state().views[0].id;
+    let mark = NewMark {
+        page: 0,
+        rect: [50.0, 50.0, 150.0, 120.0],
+        status: Status::Included,
+        label: "LP-1".into(),
+        comment: "spare".into(),
+        author: "T".into(),
+    };
+    h.state_mut().session.apply(id, Edit::AddTakeoffMark(mark)).unwrap();
+    let marks = |h: &Harness<'static, PdfCraftApp>| h.state().session.get(id).unwrap().takeoff_marks().unwrap().marks;
+    let index = marks(&h)[0].index;
+
+    // A green box tool is active and the box is selected: 3 makes it red, label and comment kept.
+    h.state_mut().quick_tool = QuickTool::Takeoff(Status::Included);
+    h.state_mut().views[0].comments.selected = Some((0, index));
+    h.key_press(egui::Key::Num3);
+    h.run_steps(3);
+    let m = &marks(&h)[0];
+    assert_eq!((m.status, m.label.as_str(), m.comment.as_str()), (Status::Excluded, "LP-1", "spare"));
+    assert_eq!(h.state().quick_tool, QuickTool::Takeoff(Status::Included), "the tool stays");
+
+    // With nothing selected, a key picks the tool instead.
+    h.state_mut().views[0].comments.selected = None;
+    h.key_press(egui::Key::Num2);
+    h.run_steps(2);
+    assert_eq!(h.state().quick_tool, QuickTool::Takeoff(Status::IncludedWithComments));
+    assert_eq!(marks(&h)[0].status, Status::Excluded);
+
+    // Delete removes the selected box.
+    h.state_mut().views[0].comments.selected = Some((0, index));
+    h.key_press(egui::Key::Delete);
+    h.run_steps(3);
+    assert!(marks(&h).is_empty());
+}
