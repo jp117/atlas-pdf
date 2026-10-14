@@ -1,10 +1,11 @@
-//! Asks GitHub for the latest PdfCraft release (Help ▸ Check for updates, issue #28).
+//! Asks GitHub for the latest Atlas PDF release (Help ▸ Check for updates, issue #28). Atlas fork:
+//! never PdfCraft's releases, which would take an Atlas user off the fork.
 
 use std::time::Duration;
 
 use pdfcraft_ui_egui::updates::{RELEASES_PAGE, Release};
 
-const LATEST: &str = "https://api.github.com/repos/storytold/pdfcraft/releases/latest";
+const LATEST: &str = "https://api.github.com/repos/jp117/atlas-pdf/releases/latest";
 
 /// The latest release. The answer is untrusted: its size is capped, and only a page under
 /// [`RELEASES_PAGE`] is ever offered for download (anything else falls back to that list).
@@ -17,7 +18,7 @@ pub fn latest_release() -> Result<Release, String> {
     let mut response = agent
         .get(LATEST)
         .header("Accept", "application/vnd.github+json")
-        .header("User-Agent", concat!("PdfCraft/", env!("CARGO_PKG_VERSION")))
+        .header("User-Agent", concat!("AtlasPDF/", env!("CARGO_PKG_VERSION")))
         // Read error statuses ourselves: a 403 from GitHub usually means its anonymous
         // rate limit ran out, and the retry time rides along in a response header.
         .config()
@@ -29,6 +30,10 @@ pub fn latest_release() -> Result<Release, String> {
     if status == 403 {
         let reset = response.headers().get("x-ratelimit-reset").and_then(|v| v.to_str().ok());
         return Err(rate_limited(reset, now_unix()));
+    }
+    // Atlas fork: the repository is private, so GitHub answers an anonymous request with 404.
+    if status == 404 {
+        return Err("no Atlas PDF release is published where this check can see it (the release page may be private)".into());
     }
     if !(200..300).contains(&status) {
         return Err(format!("couldn't reach GitHub (http status: {status})"));
@@ -86,9 +91,15 @@ mod tests {
 
     #[test]
     fn answers_are_read_and_only_our_release_pages_are_offered() {
-        let r = parse(r#"{"tag_name":"v0.2.0","html_url":"https://github.com/storytold/pdfcraft/releases/tag/v0.2.0"}"#).unwrap();
-        assert_eq!(r, Release { version: "v0.2.0".into(), url: "https://github.com/storytold/pdfcraft/releases/tag/v0.2.0".into() });
-        for elsewhere in ["https://example.com/pdfcraft.exe", "https://github.com/storytold/pdfcraft/releases.evil/x", "javascript:alert(1)"] {
+        let r = parse(r#"{"tag_name":"v0.2.0","html_url":"https://github.com/jp117/atlas-pdf/releases/tag/v0.2.0"}"#).unwrap();
+        assert_eq!(r, Release { version: "v0.2.0".into(), url: "https://github.com/jp117/atlas-pdf/releases/tag/v0.2.0".into() });
+        // PdfCraft's own releases are not ours to offer: they would take an Atlas user off the fork.
+        for elsewhere in [
+            "https://example.com/pdfcraft.exe",
+            "https://github.com/jp117/atlas-pdf/releases.evil/x",
+            "https://github.com/storytold/pdfcraft/releases/tag/v9.9.9",
+            "javascript:alert(1)",
+        ] {
             let r = parse(&format!(r#"{{"tag_name":"v9.9.9","html_url":"{elsewhere}"}}"#)).unwrap();
             assert_eq!(r.url, RELEASES_PAGE, "{elsewhere}");
         }
