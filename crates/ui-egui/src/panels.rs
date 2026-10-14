@@ -466,7 +466,7 @@ pub fn right_panel(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
     let Some(panel) = app.right else { return };
     let mut nav: Option<Nav> = None;
     let mut close = false;
-    let mut toggle_layer: Option<(usize, bool)> = None;
+    let mut atlas_layers: Vec<((u32, u16), bool)> = Vec::new();
     let mut attachment_action: Option<(usize, bool)> = None; // (index, open instead of save)
     let mut bm_action: Option<BmAction> = None;
     let mut bm_expand: Option<usize> = None;
@@ -632,37 +632,8 @@ pub fn right_panel(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
                     }
                     RightPanel::Pages => pages(ui, &t, info, view, modal, bm_editable, &mut nav),
                     RightPanel::Fields => field_properties = fields(ui, &t, info, &doc.form, preparing, &mut view.prepare, &mut nav, &mut panel_edit),
-                    RightPanel::Layers => {
-                        if info.layers.is_empty() {
-                            empty(ui, &t, "layers", "This document has no layers.");
-                        }
-                        for (li, l) in info.layers.iter().enumerate() {
-                            let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 32.0), Sense::click());
-                            resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Checkbox, true, l.visible, &l.name));
-                            let press = theme::Press::track(ui, &resp);
-                            press.wash(ui, rect, 6, false);
-                            let body = rect.translate(press.offset());
-                            icons::paint(
-                                ui,
-                                Rect::from_min_size(body.min + vec2(4.0, 7.0), vec2(18.0, 18.0)),
-                                if l.visible { "eye" } else { "eye-off" },
-                                16.0,
-                                t.icon,
-                            );
-                            let fg = if l.visible { t.text } else { t.text_faint };
-                            crate::widgets::paint_left(
-                                ui,
-                                body.left_center() + vec2(32.0, 0.0),
-                                &l.name,
-                                theme::regular(13.0),
-                                fg,
-                                (rect.width() - 40.0).max(0.0),
-                            );
-                            if theme::hand(resp).on_hover_text(if l.visible { tl!("Hide layer") } else { tl!("Show layer") }).clicked() {
-                                toggle_layer = Some((li, !l.visible));
-                            }
-                        }
-                    }
+                    // Atlas fork: layers grouped by trade or drawing, with presets.
+                    RightPanel::Layers => crate::atlas::layers_panel(ui, &t, id, info, &mut atlas_layers),
                     RightPanel::Signatures => {
                         sig_action = crate::sign_ui::panel(ui, &t, &doc.signatures, sig_expanded);
                     }
@@ -770,11 +741,7 @@ pub fn right_panel(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
     if let Some((ai, open)) = attachment_action {
         app.attachment_action(id, ai, open);
     }
-    if let Some((layer, visible)) = toggle_layer
-        && app.session.set_layer_visible(id, layer, visible)
-    {
-        app.views[index].invalidate_content();
-    }
+    crate::atlas::apply_layers(app, index, id, &atlas_layers);
     match nav {
         Some(Nav::Page(p)) => app.views[index].go_to_page(p),
         Some(Nav::Dest(p, dest)) => match app.session.get(id) {

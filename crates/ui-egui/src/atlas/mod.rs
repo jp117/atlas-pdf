@@ -5,6 +5,7 @@
 //! fork rebases cleanly. Strings are plain English on purpose: `tl!` literals would have to be
 //! added to every upstream translation catalogue.
 
+mod layers_panel;
 mod takeoff_panel;
 mod takeoff_tool;
 
@@ -12,6 +13,7 @@ use crate::{PdfCraftApp, QuickTool};
 use pdfcraft_atlas::takeoff::{Listing, MarkText, Status};
 use pdfcraft_engine::{DocId, Document, Edit};
 
+pub(crate) use layers_panel::{apply as apply_layers, show as layers_panel};
 pub(crate) use takeoff_panel::show as takeoff_panel;
 pub(crate) use takeoff_tool::page;
 
