@@ -22,11 +22,14 @@ Box equipment on a drawing to record whether Atlas quotes it:
 | `2` | Included w/ comments     | yellow |
 | `3` | Excluded                 | red    |
 
-- Press `1`, `2` or `3` (or pick from **Menu ▸ Atlas**) and drag a box over the equipment.
+- Press `1`, `2` or `3`, or click the green, yellow or red box at the bottom of the tool strip
+  beside the page (also in **Menu ▸ Atlas**), and drag a box over the equipment. Boxes are
+  filled with a see-through tint of their colour, so the drawing stays readable.
 - The box is labelled with the text inside it, including AutoCAD SHX text, so a disconnect boxed
   on an AutoCAD sheet arrives labelled `1600A D.S.#1 1500A FU`.
 - A yellow box asks for its comment straight away (Enter adds, Esc cancels).
-- With the Select tool, `1`/`2`/`3` re-mark the selected box.
+- Click a box (without dragging) to select it: `Delete` removes it, and `1`/`2`/`3` re-mark
+  it. With nothing selected, `1`/`2`/`3` pick the tool.
 - The **Takeoff** panel lists every mark sheet by sheet with a count per status. You can filter
   it and edit a mark's status, label and comment, and **Export takeoff as CSV** saves the list.
 
