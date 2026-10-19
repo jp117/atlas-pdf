@@ -117,6 +117,7 @@ impl PdfCraftApp {
             after_open: request.after_open,
             recovered: request.recovered,
             then: request.then,
+            window: self.current_window(),
         });
         Ok(token)
     }
@@ -135,7 +136,11 @@ impl PdfCraftApp {
                 break;
             }
             match pending.receiver.try_recv() {
-                Ok(result) if result.token == pending.token => self.finish_pending_open(pending, result.kind),
+                Ok(result) if result.token == pending.token => {
+                    // In the window that asked (the current one when that window has closed).
+                    let window = if self.has_window(pending.window) { pending.window } else { self.current_window() };
+                    self.with_window(window, |app| app.finish_pending_open(pending, result.kind));
+                }
                 Ok(_) => waiting.push(pending),
                 Err(std::sync::mpsc::TryRecvError::Empty) => waiting.push(pending),
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => {

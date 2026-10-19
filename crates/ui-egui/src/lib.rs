@@ -228,6 +228,8 @@ struct PendingOpen {
     after_open: Option<pdfcraft_render::RemoteDestination>,
     recovered: Option<RecoveryMeta>,
     then: Option<&'static str>,
+    /// The window the open was asked in: its tab goes there, whichever window is focused by then.
+    window: WindowId,
 }
 
 pub struct PdfCraftApp {
