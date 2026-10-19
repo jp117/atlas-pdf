@@ -2824,3 +2824,11 @@ key	Space	Space
 	Rotate the selected pages clockwise	Xoay các trang đã chọn theo chiều kim đồng hồ
 	Extract the selected pages…	Trích xuất các trang đã chọn…
 	Delete the selected pages	Xóa các trang đã chọn
+# Several windows (M14): the Window menu, the tab context menu, the limit notice.
+	Window	Cửa sổ
+	Move tab to new window	Chuyển thẻ sang cửa sổ mới
+	Merge all windows	Gộp tất cả cửa sổ
+	Close window	Đóng cửa sổ
+	Move to new window	Chuyển sang cửa sổ mới
+	Move to window	Chuyển sang cửa sổ
+	Too many windows are open	Đã mở quá nhiều cửa sổ

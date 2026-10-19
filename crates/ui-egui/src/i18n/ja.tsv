@@ -2557,3 +2557,11 @@ animation effects	Off	オフ
 	Rotate the selected pages clockwise	選択したページを時計回りに回転
 	Extract the selected pages…	選択したページを抽出…
 	Delete the selected pages	選択したページを削除
+# Several windows (M14): the Window menu, the tab context menu, the limit notice.
+	Window	ウィンドウ
+	Move tab to new window	タブを新しいウィンドウに移動
+	Merge all windows	すべてのウィンドウを統合
+	Close window	ウィンドウを閉じる
+	Move to new window	新しいウィンドウに移動
+	Move to window	ウィンドウに移動
+	Too many windows are open	開いているウィンドウが多すぎます

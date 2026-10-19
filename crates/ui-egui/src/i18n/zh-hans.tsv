@@ -2521,3 +2521,11 @@ animation effects	Off	关
 	Rotate the selected pages clockwise	顺时针旋转所选页面
 	Extract the selected pages…	提取所选页面…
 	Delete the selected pages	删除所选页面
+# Several windows (M14): the Window menu, the tab context menu, the limit notice.
+	Window	窗口
+	Move tab to new window	将标签页移到新窗口
+	Merge all windows	合并所有窗口
+	Close window	关闭窗口
+	Move to new window	移到新窗口
+	Move to window	移到窗口
+	Too many windows are open	打开的窗口过多
