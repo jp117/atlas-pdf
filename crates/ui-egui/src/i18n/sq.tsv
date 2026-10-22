@@ -2544,3 +2544,11 @@ animation effects	Off	Joaktiv
 	Rotate the selected pages clockwise	Rrotullo faqet e përzgjedhura në drejtim të orës
 	Extract the selected pages…	Nxirr faqet e përzgjedhura…
 	Delete the selected pages	Fshi faqet e përzgjedhura
+# Several windows (M14).
+	Window	Dritare
+	Move tab to new window	Zhvendos skedën në një dritare të re
+	Merge all windows	Bashko të gjitha dritaret
+	Close window	Mbyll dritaren
+	Move to new window	Zhvendos në një dritare të re
+	Move to window	Zhvendos në dritare
+	Too many windows are open	Janë hapur shumë dritare

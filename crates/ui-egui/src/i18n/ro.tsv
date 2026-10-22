@@ -2818,3 +2818,11 @@ theme	Appearance	Aspect
 	Rotate the selected pages clockwise	Rotește paginile selectate în sens orar
 	Extract the selected pages…	Extrage paginile selectate…
 	Delete the selected pages	Șterge paginile selectate
+# Several windows (M14).
+	Window	Fereastră
+	Move tab to new window	Mutare filă în fereastră nouă
+	Merge all windows	Combinare toate ferestrele
+	Close window	Închidere fereastră
+	Move to new window	Mutare în fereastră nouă
+	Move to window	Mutare în fereastră
+	Too many windows are open	Sunt deschise prea multe ferestre
