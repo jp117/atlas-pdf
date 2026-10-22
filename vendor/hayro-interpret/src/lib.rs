@@ -53,6 +53,8 @@ pub mod shading;
 pub mod util;
 
 pub use cache::CacheKey;
+// PdfCraft patch: decoded images shared by a render pool's threads.
+pub use cache::SharedImageCache;
 pub use context::*;
 pub use device::*;
 pub use function::Function;

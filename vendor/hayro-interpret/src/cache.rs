@@ -2,9 +2,10 @@ use crate::util::hash128;
 use hayro_syntax::object::{Array, Dict, MaybeRef, Name, Null, ObjRef, Object, Stream};
 use kurbo::Affine;
 use std::any::Any;
-use std::collections::HashMap;
 use std::collections::hash_map::Entry;
-use std::sync::{Arc, Mutex};
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::Duration;
 
 type CacheMap = HashMap<u128, Option<Box<dyn Any + Send + Sync>>>;
 #[derive(Clone)]
@@ -51,16 +52,16 @@ impl Cache {
 
 /// PdfCraft patch: a byte-budgeted cache of decoded images, keyed by everything a decode reads
 /// ([`DecodedImageKey`]). Image-heavy pages decode thousands of images; without this every tile
-/// and every scale decodes them all again. Entries hold owned pixels, so a hit never changes
-/// them; when an insert would pass the budget the whole map is dropped (a fresh epoch), which
-/// only costs re-decoding, and an image larger than the whole budget is never kept. The budget
-/// caps memory per interpreter cache. A poisoned lock decodes without the cache.
+/// and every scale decodes them all again. Entries are shared (`Arc`), so a hit lends the pixels
+/// without copying them; when an insert would pass the budget the whole map is dropped (a fresh
+/// epoch), which only costs re-decoding, and an image larger than the whole budget is never kept.
+/// The budget caps memory per cache, which several interpreter caches may share
+/// ([`SharedImageCache`]). While one thread decodes an image, the others that ask for it wait
+/// for that decode (at most [`PENDING_WAIT`]) instead of repeating it alongside, which for a large
+/// scan multiplied its memory by the render threads. A poisoned lock decodes without the cache.
 #[derive(Clone)]
 pub(crate) struct DecodedImageCache {
-    inner: Arc<Mutex<DecodedImageCacheInner>>,
-    /// Whether the render this handle serves is a preview (`InterpreterSettings::preview`).
-    /// Part of every key, so a preview's entries are never handed to a final render.
-    pub(crate) preview: bool,
+    inner: Arc<(Mutex<DecodedImageCacheInner>, Condvar)>,
 }
 
 /// PdfCraft patch: what a decoded image depends on. Two images share an entry only when all of
@@ -71,12 +72,15 @@ pub(crate) struct DecodedImageCache {
 ///   would not; the data stays put for as long as the document (and so this cache) lives;
 /// - the dictionary's bytes (`dict_hash`: `/Decode`, `/ColorSpace`, `/SMask`, `/Mask`,
 ///   `/BitsPerComponent`, filters, …) and its object (`obj`: the decryption key depends on it);
-/// - whether it is decoded as a mask, a stencil mask, raster or mask output, interpolation,
-///   the decode target size, and preview or final quality.
+/// - whether it is decoded as a mask, a stencil mask, raster or mask output, interpolation, and
+///   the decode target size where the decode reads it (JPEG 2000 only, see
+///   `ImageXObject::decode_key`).
 ///
 /// A transfer function (graphics state `/TR`) also changes the pixels and has no cheap key, so
 /// an image drawn under one is not cached; neither is an inline image, whose dictionary lives in
 /// a content stream and whose colour space can be a name resolved through the resources.
+/// Previews decode exactly as final renders do (they only skip drawing tiny images), so the two
+/// share entries.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct DecodedImageKey {
     pub(crate) mask_output: bool,
@@ -88,83 +92,172 @@ pub(crate) struct DecodedImageKey {
     pub(crate) is_stencil_mask: bool,
     pub(crate) interpolate: bool,
     pub(crate) target: Option<(u32, u32)>,
-    pub(crate) preview: bool,
 }
 
-#[derive(Default)]
+type DecodedEntry = Option<Arc<dyn Any + Send + Sync>>;
+
 struct DecodedImageCacheInner {
-    map: HashMap<DecodedImageKey, Option<Box<dyn Any + Send + Sync>>>,
+    map: HashMap<DecodedImageKey, DecodedEntry>,
     bytes: usize,
+    budget: usize,
+    /// Images some thread is decoding now.
+    pending: HashSet<DecodedImageKey>,
+    /// Images decoded too large for the budget: every thread decodes these on its own, rather
+    /// than wait for a decode it can't use.
+    oversized: HashSet<DecodedImageKey>,
+    /// How many decodes ran through the cache (misses), for tests.
+    decodes: usize,
 }
+
+/// PdfCraft patch: the decoded-image budget of an interpreter cache of its own.
+const DEFAULT_DECODED_IMAGE_BYTES: usize = 64 << 20;
+
+/// PdfCraft patch: the longest a thread waits for another's decode of the same image before it
+/// decodes the image itself. Decodes take milliseconds to a few seconds; this bounds the wait if
+/// one never finishes. Every wake-up counts as a whole [`PENDING_POLL`], so other decodes ending
+/// meanwhile can only shorten the wait.
+const PENDING_WAIT: Duration = Duration::from_secs(5);
+
+/// PdfCraft patch: how often a waiting thread looks again, in case a wake-up was missed.
+const PENDING_POLL: Duration = Duration::from_millis(50);
 
 impl DecodedImageCache {
+    /// A cache keeping at most [`DEFAULT_DECODED_IMAGE_BYTES`] of decoded pixels.
     pub(crate) fn new() -> Self {
+        Self::with_budget(DEFAULT_DECODED_IMAGE_BYTES)
+    }
+
+    /// A cache keeping at most `budget` bytes of decoded pixels.
+    pub(crate) fn with_budget(budget: usize) -> Self {
         Self {
-            inner: Arc::new(Mutex::new(DecodedImageCacheInner::default())),
-            preview: false,
+            inner: Arc::new((
+                Mutex::new(DecodedImageCacheInner {
+                    map: HashMap::new(),
+                    bytes: 0,
+                    budget,
+                    pending: HashSet::new(),
+                    oversized: HashSet::new(),
+                    decodes: 0,
+                }),
+                Condvar::new(),
+            )),
         }
     }
 
-    /// The same cache, for a preview (`true`) or a final render.
-    pub(crate) fn for_render(&self, preview: bool) -> Self {
-        Self {
-            inner: self.inner.clone(),
-            preview,
-        }
-    }
-
-    /// The decoded image for `key`, from the cache or from `f`. `None` as the key decodes
-    /// without the cache.
-    pub(crate) fn get_or_insert_with<T: Clone + Send + Sync + 'static>(
+    /// The decoded image for `key`, from the cache or from `f`, whose result holds `size_of`
+    /// bytes. `None` as the key decodes without the cache.
+    pub(crate) fn get_or_insert_with<T: Send + Sync + 'static>(
         &self,
         key: Option<DecodedImageKey>,
-        budget: usize,
         size_of: impl FnOnce(&T) -> usize,
         f: impl FnOnce() -> Option<T>,
-    ) -> Option<T> {
-        let Some(key) = key else { return f() };
-        // Fast path: a hit clones the pixels without decoding.
-        let hit = match self.inner.lock() {
-            Ok(locked) => locked
-                .map
-                .get(&key)
-                .and_then(|val| val.as_ref())
-                .and_then(|val| val.downcast_ref::<T>().cloned()),
-            // A thread panicked while holding the lock: decode without the cache.
-            Err(_) => return f(),
+    ) -> Option<Arc<T>> {
+        let Some(key) = key else {
+            return f().map(Arc::new);
         };
-        if let Some(hit) = hit {
-            return Some(hit);
+        let (lock, decoded) = &*self.inner;
+        // A thread panicked while holding the lock: decode without the cache.
+        let Ok(mut inner) = lock.lock() else {
+            return f().map(Arc::new);
+        };
+        let mut waited = Duration::ZERO;
+        loop {
+            // A hit (or a failed decode, recorded as `None`) shares what is there.
+            if let Some(entry) = inner.map.get(&key) {
+                return entry.clone().and_then(|e| e.downcast::<T>().ok());
+            }
+            // Wait while another thread decodes this image. A single-threaded build (the web)
+            // has no other thread, and its condition variable can't wait.
+            if cfg!(target_arch = "wasm32")
+                || !inner.pending.contains(&key)
+                || inner.oversized.contains(&key)
+                || waited >= PENDING_WAIT
+            {
+                break;
+            }
+            inner = match decoded.wait_timeout(inner, PENDING_POLL) {
+                Ok((inner, _)) => inner,
+                Err(_) => return f().map(Arc::new),
+            };
+            waited = waited.saturating_add(PENDING_POLL);
         }
-        // Miss: decode without holding the lock (decoding must never deadlock the cache).
-        let val = f();
-        let Ok(mut locked) = self.inner.lock() else {
+        // Claim the decode, unless another thread still holds it (the wait ran out) or the
+        // image is known not to fit: then this thread decodes on its own. (Built lazily: a
+        // claim dropped unclaimed would release another thread's, under the lock held here.)
+        let claim =
+            (!inner.oversized.contains(&key) && inner.pending.insert(key)).then(|| PendingDecode {
+                cache: &self.inner,
+                key,
+            });
+        inner.decodes = inner.decodes.saturating_add(1);
+        drop(inner);
+        let val = f().map(Arc::new);
+        let Ok(mut inner) = lock.lock() else {
             return val;
         };
         // Another thread may have decoded it meanwhile: keep the first copy.
-        if let Some(existing) = locked.map.get(&key)
-            && let Some(existing) = existing.as_ref().and_then(|val| val.downcast_ref::<T>())
+        if let Some(existing) = inner.map.get(&key)
+            && let Some(existing) = existing.clone().and_then(|e| e.downcast::<T>().ok())
         {
-            return Some(existing.clone());
+            return Some(existing);
         }
-        let size = match &val {
-            Some(v) => size_of(v),
-            None => 0,
-        };
-        if size > budget {
-            return val;
+        let size = val.as_deref().map_or(0, size_of);
+        if size > inner.budget {
+            inner.oversized.insert(key);
+        } else {
+            if inner.bytes.saturating_add(size) > inner.budget {
+                inner.map.clear();
+                inner.oversized.clear();
+                inner.bytes = 0;
+            }
+            inner.bytes = inner.bytes.saturating_add(size);
+            inner
+                .map
+                .insert(key, val.clone().map(|v| v as Arc<dyn Any + Send + Sync>));
         }
-        if locked.bytes.saturating_add(size) > budget {
-            locked.map.clear();
-            locked.bytes = 0;
-        }
-        locked.bytes = locked.bytes.saturating_add(size);
-        locked.map.insert(
-            key,
-            val.clone()
-                .map(|val| Box::new(val) as Box<dyn Any + Send + Sync>),
-        );
+        // Release the lock before the claim, which takes it again to let the waiters go.
+        drop(inner);
+        drop(claim);
         val
+    }
+}
+
+/// PdfCraft patch: a decode a thread has claimed (`DecodedImageCacheInner::pending`). Dropping
+/// it releases the claim and wakes the threads waiting for it, however the decode ended (a
+/// panic included), so a waiter never waits for a decode that is not running.
+struct PendingDecode<'c> {
+    cache: &'c (Mutex<DecodedImageCacheInner>, Condvar),
+    key: DecodedImageKey,
+}
+
+impl Drop for PendingDecode<'_> {
+    fn drop(&mut self) {
+        let (lock, decoded) = self.cache;
+        if let Ok(mut inner) = lock.lock() {
+            inner.pending.remove(&self.key);
+        }
+        decoded.notify_all();
+    }
+}
+
+/// PdfCraft patch: decoded image pixels shared by several interpreter caches over the same
+/// document data (the threads of a render pool), within one byte budget, so a large scan is
+/// decoded and held once rather than once per thread. Its keys hold where each image's
+/// dictionary lies in the document's data, so every cache sharing it must interpret the same
+/// bytes, and it must not outlive them.
+#[derive(Clone)]
+pub struct SharedImageCache(pub(crate) DecodedImageCache);
+
+impl SharedImageCache {
+    /// A cache keeping at most `budget` bytes of decoded pixels.
+    pub fn new(budget: usize) -> Self {
+        Self(DecodedImageCache::with_budget(budget))
+    }
+
+    /// How many images were decoded through the cache (its misses), for PdfCraft's tests.
+    #[doc(hidden)]
+    pub fn decodes(&self) -> usize {
+        self.0.inner.0.lock().map_or(0, |inner| inner.decodes)
     }
 }
 

@@ -38,6 +38,7 @@ use hayro_interpret::Device;
 use hayro_interpret::FillRule;
 use hayro_interpret::InterpreterCache;
 use hayro_interpret::InterpreterSettings;
+use hayro_interpret::SharedImageCache;
 use hayro_interpret::hayro_syntax::Pdf;
 use hayro_interpret::hayro_syntax::page::Page;
 use hayro_interpret::util::{RectExt, TransformExt};
@@ -61,7 +62,7 @@ use vello_cpu::{Level, Pixmap, RenderMode};
 
 mod renderer;
 /// PdfCraft patch: exported for its regression test.
-pub use renderer::{image_resampling_size, tiling_cell_scale};
+pub use renderer::{image_resampling_size, image_window, tiling_cell_scale};
 /// PdfCraft patch: exported for its regression test.
 #[doc(hidden)]
 pub use renderer::set_skip_offscreen_paths;
@@ -81,6 +82,15 @@ impl<'a> RenderCache<'a> {
     pub fn new() -> Self {
         Self {
             interpreter_cache: InterpreterCache::new(),
+            outline_cache: Rc::new(RefCell::new(HashMap::new())),
+        }
+    }
+
+    /// PdfCraft patch: a new render cache whose decoded images live in `images`, which other
+    /// render caches over the same document data share (see [`SharedImageCache`]).
+    pub fn with_shared_images(images: &SharedImageCache) -> Self {
+        Self {
+            interpreter_cache: InterpreterCache::with_shared_images(images),
             outline_cache: Rc::new(RefCell::new(HashMap::new())),
         }
     }

@@ -36,13 +36,16 @@ impl<'a, 'b> StencilImage<'a, 'b> {
     /// mean that the resulting image will have that dimension. Instead, it allows
     /// the image decoder to extract a lower-resolution version of the image in
     /// certain cases.
+    ///
+    /// PdfCraft patch: the data is lent, not handed over: decoded images are shared through the
+    /// interpreter cache, so a large scan drawn by every tile of its page is never copied.
     pub fn with_stencil(
         &self,
-        func: impl FnOnce(LumaData, &Paint<'a>),
+        func: impl FnOnce(&LumaData, &Paint<'a>),
         target_dimension: Option<(u32, u32)>,
     ) {
         if let Some(decoded) = self.image_xobject.decoded_mask(target_dimension) {
-            func(decoded.luma, &self.paint);
+            func(&decoded.luma, &self.paint);
         }
     }
 
@@ -76,13 +79,15 @@ impl RasterImage<'_> {
     /// mean that the resulting image will have that dimension. Instead, it allows
     /// the image decoder to extract a lower-resolution version of the image in
     /// certain cases.
+    ///
+    /// PdfCraft patch: the data is lent, not handed over (see [`StencilImage::with_stencil`]).
     pub fn with_rgba(
         &self,
-        func: impl FnOnce(ImageData, Option<LumaData>),
+        func: impl FnOnce(&ImageData, Option<&LumaData>),
         target_dimension: Option<(u32, u32)>,
     ) {
         if let Some(decoded) = self.0.decoded_raster(target_dimension) {
-            func(decoded.image, decoded.alpha);
+            func(&decoded.image, decoded.alpha.as_ref());
         }
     }
 

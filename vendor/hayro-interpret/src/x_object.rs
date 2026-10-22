@@ -8,6 +8,7 @@ use crate::interpret::state::ActiveTransferFunction;
 use crate::{BlendMode, CacheKey, ClipPath, Image, RasterImage, StencilImage};
 use crate::{FillRule, InterpreterWarning, WarningSinkFn, interpret};
 use crate::{ImageData, LumaData, RgbData};
+use hayro_syntax::Filter;
 use hayro_syntax::bit_reader::BitReader;
 use hayro_syntax::content::TypedIter;
 use hayro_syntax::object::Array;
@@ -23,6 +24,7 @@ use smallvec::{SmallVec, smallvec};
 use std::borrow::Cow;
 use std::iter;
 use std::ops::Deref;
+use std::sync::Arc;
 
 pub(crate) enum XObject<'a> {
     FormXObject(FormXObject<'a>),
@@ -347,18 +349,20 @@ impl<'a> ImageXObject<'a> {
         })
     }
 
-    pub(crate) fn decoded_mask(&self, target_dimension: Option<(u32, u32)>) -> Option<DecodedMask> {
+    pub(crate) fn decoded_mask(
+        &self,
+        target_dimension: Option<(u32, u32)>,
+    ) -> Option<Arc<DecodedMask>> {
         if !self.is_mask {
             return None;
         }
 
         // PdfCraft patch: decode once per `DecodedImageKey`; tiles and scales share it.
         let Some(cache) = &self.decoded_cache else {
-            return decode_mask(self, target_dimension);
+            return decode_mask(self, target_dimension).map(Arc::new);
         };
         cache.get_or_insert_with(
-            self.decode_key(cache, true, target_dimension),
-            MAX_DECODED_IMAGE_BYTES,
+            self.decode_key(true, target_dimension),
             decoded_mask_size,
             || decode_mask(self, target_dimension),
         )
@@ -367,18 +371,17 @@ impl<'a> ImageXObject<'a> {
     pub(crate) fn decoded_raster(
         &self,
         target_dimension: Option<(u32, u32)>,
-    ) -> Option<DecodedRaster> {
+    ) -> Option<Arc<DecodedRaster>> {
         if self.is_mask {
             return None;
         }
 
         // PdfCraft patch: decode once per `DecodedImageKey`; tiles and scales share it.
         let Some(cache) = &self.decoded_cache else {
-            return decode_raster(self, target_dimension);
+            return decode_raster(self, target_dimension).map(Arc::new);
         };
         cache.get_or_insert_with(
-            self.decode_key(cache, false, target_dimension),
-            MAX_DECODED_IMAGE_BYTES,
+            self.decode_key(false, target_dimension),
             decoded_raster_size,
             || decode_raster(self, target_dimension),
         )
@@ -389,7 +392,6 @@ impl<'a> ImageXObject<'a> {
     /// of them can't be keyed cheaply (a transfer function): such a decode isn't cached.
     pub(crate) fn decode_key(
         &self,
-        cache: &DecodedImageCache,
         mask_output: bool,
         target_dimension: Option<(u32, u32)>,
     ) -> Option<DecodedImageKey> {
@@ -407,9 +409,21 @@ impl<'a> ImageXObject<'a> {
             is_mask: self.is_mask,
             is_stencil_mask: self.is_stencil_mask,
             interpolate: self.interpolate,
-            target: target_dimension,
-            preview: cache.preview,
+            // Every other decoder ignores the target, and it changes with each scale: keyed
+            // only where it is read, a page's images are decoded once for all its zooms.
+            target: target_dimension.filter(|_| self.decodes_at_target()),
         })
+    }
+
+    /// PdfCraft patch: whether decoding this image reads the target size. Only JPEG 2000 does
+    /// (it skips resolution levels the target doesn't need), for the image itself or for the
+    /// soft mask or mask decoded with it.
+    fn decodes_at_target(&self) -> bool {
+        let jpx = |stream: &Stream<'_>| stream.filters().contains(&Filter::JpxDecode);
+        let dict = self.stream.dict();
+        jpx(&self.stream)
+            || dict.get::<Stream<'_>>(SMASK).is_some_and(|s| jpx(&s))
+            || dict.get::<Stream<'_>>(MASK).is_some_and(|s| jpx(&s))
     }
 
     pub(crate) fn width(&self) -> u32 {
@@ -430,10 +444,6 @@ impl<'a> ImageXObject<'a> {
         dict.contains_key(SMASK_IN_DATA) || dict.contains_key(SMASK) || dict.contains_key(MASK)
     }
 }
-
-/// PdfCraft patch: budget for [`DecodedImageCache`] entries per interpreter cache: decoded
-/// image pixels shared across tiles and scales. Past it the cache starts a fresh epoch.
-const MAX_DECODED_IMAGE_BYTES: usize = 64 << 20;
 
 /// PdfCraft patch: pixel bytes held by a decoded mask.
 fn decoded_mask_size(mask: &DecodedMask) -> usize {

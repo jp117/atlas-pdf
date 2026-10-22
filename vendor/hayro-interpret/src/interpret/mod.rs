@@ -777,11 +777,9 @@ fn interpret_window<'a>(
             TypedInstruction::ShapeGlyph(_) => {}
             TypedInstruction::XObject(x) => {
                 let cache = context.interpreter_cache.object_cache.clone();
-                // PdfCraft patch: decoded images are cached per quality (preview or final).
-                let decoded_cache = context
-                    .interpreter_cache
-                    .decoded_cache
-                    .for_render(context.settings.preview);
+                // PdfCraft patch: decoded images are shared across renders (see
+                // `DecodedImageCache`); previews decode as finals do.
+                let decoded_cache = context.interpreter_cache.decoded_cache.clone();
                 let transfer_function = context.get().graphics_state.transfer_function.clone();
                 if let Some(x_object) = resources.get_x_object(x.0).and_then(|s| {
                     XObject::new(

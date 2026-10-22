@@ -23,7 +23,7 @@ use work_queue::{ResultReceiver, WorkQueue};
 
 use hayro::hayro_interpret::font::{FontData, FontQuery};
 use hayro::hayro_interpret::hayro_cmap::CidFamily;
-use hayro::hayro_interpret::{InterpreterSettings, InterpreterWarning};
+use hayro::hayro_interpret::{InterpreterSettings, InterpreterWarning, SharedImageCache};
 use hayro::hayro_syntax::Pdf;
 use hayro::vello_cpu::color::AlphaColor;
 use hayro::vello_cpu::color::palette::css::WHITE;
@@ -123,6 +123,24 @@ fn japanese_face(name: &str, serif: bool, bold: bool) -> JapaneseFace {
         JapaneseFace::Gothic { bold }
     } else {
         JapaneseFace::Mincho
+    }
+}
+
+/// Bytes of decoded image pixels a renderer keeps for all its renders (and a pool for all its
+/// workers) to share: room for a full-page scan of a large drawing sheet (a 12353 × 8999
+/// greyscale scan holds 111 MB; an ARCH D sheet scanned in colour at 300 dpi, 233 MB), so its
+/// tiles and zooms decode it once between them. Each pool worker used to keep 64 MiB of its own,
+/// up to 448 MiB over seven, and none of them could keep such a scan.
+const SHARED_IMAGE_BYTES: usize = 256 << 20;
+
+/// Decoded images shared by a pool's workers (see [`SHARED_IMAGE_BYTES`]).
+#[cfg(not(target_arch = "wasm32"))]
+struct PoolImages(SharedImageCache);
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Default for PoolImages {
+    fn default() -> Self {
+        Self(SharedImageCache::new(SHARED_IMAGE_BYTES))
     }
 }
 
@@ -415,13 +433,16 @@ pub struct PageRenderer {
     pdf: Option<Pdf>,
     settings: InterpreterSettings,
     stats: RenderStats,
+    /// Decoded images shared by its renders (over `bytes`, which every parse reads).
+    images: SharedImageCache,
 }
 
 impl PageRenderer {
     pub fn new(bytes: Arc<Vec<u8>>, config: RenderConfig) -> Self {
         let pdf = parse(&bytes, config.password.as_deref());
         let settings = config.settings();
-        Self { bytes, config, pdf, settings, stats: RenderStats { parser_builds: 1, ..RenderStats::default() } }
+        let images = SharedImageCache::new(SHARED_IMAGE_BYTES);
+        Self { bytes, config, pdf, settings, stats: RenderStats { parser_builds: 1, ..RenderStats::default() }, images }
     }
 
     pub fn page_count(&self) -> usize {
@@ -452,7 +473,7 @@ impl PageRenderer {
         let Some(pdf) = self.pdf.as_ref() else {
             return finish(req, start, Err(("the document could not be parsed".into(), false)), Vec::new());
         };
-        let cache = RenderCache::new();
+        let cache = RenderCache::with_shared_images(&self.images);
         let warnings = Arc::new(Mutex::new(Vec::new()));
         let settings = warning_settings(&self.settings, warnings.clone());
         let r = render_page(pdf, &cache, &settings, self.config.reject_oversize, request_reading(&self.config, &req), req);
@@ -535,6 +556,10 @@ struct Shared {
     /// request cannot trap every worker in turn while other scales, tiles, or generations remain usable.
     stuck: Mutex<std::collections::HashSet<RequestFailureKey>>,
     stats: AtomicRenderStats,
+    /// Decoded images every worker's render cache shares: every parser reads the pool's bytes,
+    /// so their images agree, and the cache lives no longer than the workers that hold them.
+    #[cfg(not(target_arch = "wasm32"))]
+    images: PoolImages,
     /// Per worker id: set to stop that worker's render at its next content operator once nobody
     /// can receive its answer (the pool was dropped, or the watchdog gave up on the render).
     /// Lock `busy` first when holding both.
@@ -1091,7 +1116,7 @@ fn worker(
                         }) {
                             Some(pdf) => {
                                 let shared_generation = pdf.is_some();
-                                (pdf, RenderCache::new(), shared_generation)
+                                (pdf, RenderCache::with_shared_images(&shared.images.0), shared_generation)
                             }
                             None => {
                                 let pdf = if !request_cancelled.load(Ordering::Acquire)
@@ -1102,7 +1127,7 @@ fn worker(
                                 } else {
                                     None
                                 };
-                                (pdf, RenderCache::new(), false)
+                                (pdf, RenderCache::with_shared_images(&shared.images.0), false)
                             }
                         }
                     };
@@ -3339,6 +3364,11 @@ trailer << /Root 1 0 R >>
     /// no decomposition, reversible wavelet, and one empty packet per component. Empty
     /// coefficients decode to the midpoint (128) after the unsigned DC level shift.
     fn jpx_midpoint_pdf(bpc: u8, components: u16) -> Vec<u8> {
+        jpx_midpoint_page(bpc, components, "q 20 0 0 20 5 5 cm /Im1 Do Q 1 0 0 rg 0 0 4 4 re f")
+    }
+
+    /// [`jpx_midpoint_pdf`]'s image as `/Im1` of a 40 × 40 page drawn by `content`.
+    fn jpx_midpoint_page(bpc: u8, components: u16, content: &str) -> Vec<u8> {
         let mut codestream = vec![0xff, 0x4f, 0xff, 0x51]; // SOC, SIZ.
         codestream.extend_from_slice(&(38 + 3 * components).to_be_bytes());
         codestream.extend_from_slice(&0_u16.to_be_bytes()); // Rsiz.
@@ -3359,7 +3389,6 @@ trailer << /Root 1 0 R >>
         codestream.extend(std::iter::repeat_n(0, usize::from(components)));
         codestream.extend_from_slice(&[0xff, 0xd9]); // EOC.
 
-        let content = "q 20 0 0 20 5 5 cm /Im1 Do Q 1 0 0 rg 0 0 4 4 re f";
         let mut pdf = format!(
             "%PDF-1.7\n\
 1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n\
@@ -3512,6 +3541,145 @@ trailer << /Root 1 0 R >>
                 assert_eq!(actual & mask, *expected, "{bpc}-bit RGB, {columns} columns");
             }
         }
+    }
+
+    /// The decoded data of a Flate stream of `encoded` with `/DecodeParms << params >>`.
+    fn predicted_stream(params: &str, encoded: &[u8]) -> Vec<u8> {
+        use hayro_syntax::object::{FromBytes, Object};
+        use std::io::Write;
+
+        let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(encoded).unwrap();
+        let compressed = encoder.finish().unwrap();
+        let mut bytes = format!("<< /Filter /FlateDecode /DecodeParms << {params} >> /Length {} >> stream\n", compressed.len()).into_bytes();
+        bytes.extend_from_slice(&compressed);
+        bytes.extend_from_slice(b"\nendstream");
+        let Object::Stream(stream) = Object::from_bytes(&bytes).unwrap() else { panic!("stream expected") };
+        stream.decoded().unwrap().into_owned()
+    }
+
+    /// PNG's row filters undone the plainest way, byte by byte as the PNG specification reads:
+    /// the oracle for the decoder. `data` is rows of a filter type byte and `row_len` bytes.
+    fn png_unfiltered(data: &[u8], row_len: usize, bpp: usize) -> Vec<u8> {
+        let mut out: Vec<u8> = Vec::new();
+        for (r, row) in data.chunks_exact(row_len + 1).enumerate() {
+            let start = r * row_len;
+            for i in 0..row_len {
+                let a = if i >= bpp { out[start + i - bpp] } else { 0 };
+                let b = if r > 0 { out[start - row_len + i] } else { 0 };
+                let c = if r > 0 && i >= bpp { out[start - row_len + i - bpp] } else { 0 };
+                let predicted = match row[0] {
+                    1 => a,
+                    2 => b,
+                    3 => ((u16::from(a) + u16::from(b)) / 2) as u8,
+                    4 => {
+                        let p = i16::from(a) + i16::from(b) - i16::from(c);
+                        let (pa, pb, pc) = ((p - i16::from(a)).abs(), (p - i16::from(b)).abs(), (p - i16::from(c)).abs());
+                        if pa <= pb && pa <= pc {
+                            a
+                        } else if pb <= pc {
+                            b
+                        } else {
+                            c
+                        }
+                    }
+                    _ => 0,
+                };
+                out.push(row[i + 1].wrapping_add(predicted));
+            }
+        }
+        out
+    }
+
+    /// Deterministic bytes covering every value, for the predictor oracles.
+    fn noise(len: usize, seed: u32) -> Vec<u8> {
+        let mut state = seed.wrapping_mul(0x9e37_79b9) | 1;
+        (0..len)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 17;
+                state ^= state << 5;
+                (state >> 24) as u8
+            })
+            .collect()
+    }
+
+    /// PNG predictors are undone a row at a time on whole bytes (vendored hayro-syntax patch). Every
+    /// filter type, at every bit depth, colour count and width, decodes as the specification reads,
+    /// including rows that end inside a pixel (4-bit RGB of odd width): their last byte was dropped
+    /// and every later row started early.
+    #[test]
+    fn png_predictors_decode_every_filter_type_at_every_depth_and_width() {
+        let mut seed = 0;
+        for bpc in [1usize, 2, 4, 8, 16] {
+            for colors in 1usize..=4 {
+                for columns in [1usize, 2, 3, 7] {
+                    let row_len = (columns * bpc * colors).div_ceil(8);
+                    let bpp = (bpc * colors).div_ceil(8);
+                    seed += 1;
+                    // Every filter type, an unknown one (5) and a row cut short at the end.
+                    let mut encoded = noise(7 * (row_len + 1) + row_len / 2, seed);
+                    for (row, tag) in encoded.chunks_exact_mut(row_len + 1).zip([0u8, 1, 2, 3, 4, 5, 2]) {
+                        row[0] = tag;
+                    }
+                    let params = format!("/Predictor 15 /Colors {colors} /BitsPerComponent {bpc} /Columns {columns}");
+                    assert_eq!(
+                        predicted_stream(&params, &encoded),
+                        png_unfiltered(&encoded, row_len, bpp),
+                        "{bpc}-bit, {colors} colours, {columns} columns"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The TIFF predictor on 8-bit samples adds the pixel to the left, as PNG's Sub does.
+    #[test]
+    fn tiff_predictor_of_eight_bit_samples_adds_the_pixel_to_the_left() {
+        for colors in 1usize..=4 {
+            let row_len = 5 * colors;
+            let encoded = noise(3 * row_len + 2, colors as u32);
+            let tagged: Vec<u8> = encoded.chunks_exact(row_len).flat_map(|row| std::iter::once(1).chain(row.iter().copied())).collect();
+            let params = format!("/Predictor 2 /Colors {colors} /BitsPerComponent 8 /Columns 5");
+            assert_eq!(predicted_stream(&params, &encoded), png_unfiltered(&tagged, row_len, colors), "{colors} colours");
+        }
+    }
+
+    /// A PNG-predicted 4-bit RGB image three pixels wide: its rows are five bytes, the last one
+    /// half a pixel. That byte was dropped, so the first row ended in the wrong blue and the
+    /// second started a byte early (blue, black, black instead of red, green, blue).
+    #[test]
+    fn png_predicted_rows_ending_inside_a_pixel_render_every_pixel() {
+        use std::io::Write;
+
+        // Rows (1,2,3) (4,5,6) (7,8,9) and (15,0,0) (0,15,0) (0,0,15) in 4-bit samples, each
+        // filtered with PNG's Sub over two-byte pixels.
+        let encoded = [1, 0x12, 0x34, 0x44, 0x44, 0x3a, 1, 0xf0, 0x00, 0x00, 0x00, 0x00];
+        let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(&encoded).unwrap();
+        let compressed = encoder.finish().unwrap();
+        let content = "q 30 0 0 20 0 0 cm /Im1 Do Q";
+        let mut pdf = format!(
+            "%PDF-1.7\n\
+1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n\
+2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj\n\
+3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 30 20] /Contents 4 0 R /Resources << /XObject << /Im1 5 0 R >> >> >> endobj\n\
+4 0 obj << /Length {} >> stream\n{content}\nendstream endobj\n\
+5 0 obj << /Type /XObject /Subtype /Image /Width 3 /Height 2 /ColorSpace /DeviceRGB /BitsPerComponent 4 /Filter /FlateDecode /DecodeParms << /Predictor 15 /Colors 3 /BitsPerComponent 4 /Columns 3 >> /Length {} >> stream\n",
+            content.len(),
+            compressed.len()
+        )
+        .into_bytes();
+        pdf.extend_from_slice(&compressed);
+        pdf.extend_from_slice(b"\nendstream endobj\ntrailer << /Root 1 0 R >>\n%%EOF\n");
+        let mut renderer = PageRenderer::new(Arc::new(pdf), RenderConfig::default());
+        let page = renderer.render(RenderRequest { page: 0, kind: RequestKind::Pixels, scale: 1.0, ..Default::default() });
+        assert!(page.error.is_none(), "{:?}", page.error);
+        assert_eq!((page.width, page.height), (30, 20));
+        let pixel = |x: usize, y: usize| <[u8; 4]>::try_from(&page.rgba[((y * 10 + 5) * 30 + x * 10 + 5) * 4..][..4]).unwrap();
+        // 4-bit samples scale by 17 to 8 bits.
+        assert_eq!([pixel(0, 0), pixel(1, 0), pixel(2, 0)], [[17, 34, 51, 255], [68, 85, 102, 255], [119, 136, 153, 255]]);
+        assert_eq!([pixel(0, 1), pixel(1, 1), pixel(2, 1)], [[255, 0, 0, 255], [0, 255, 0, 255], [0, 0, 255, 255]]);
     }
 
     #[test]
@@ -5532,7 +5700,7 @@ endstream endobj
     /// Two images whose dictionaries are byte for byte the same (uncompressed, one size) but
     /// whose pixels differ each draw their own: the decoded-image cache tells them apart by the
     /// stream, not by the dictionary's bytes alone, in one render and across renders sharing a
-    /// cache, and previews never hand their entries to a final render.
+    /// cache, and a final render after a preview that shared its cache matches a fresh one.
     #[test]
     fn decoded_images_with_identical_dictionaries_keep_their_own_pixels() {
         let pdf = image_cache_pdf(
@@ -5577,6 +5745,248 @@ endstream endobj
         let w = out.width as usize;
         assert_eq!(rgb_at(&out.rgba, w, 35, 35), [0, 255, 255], "the transfer function was not applied to a cached image");
         assert_eq!(rgb_at(&out.rgba, w, 100, 35), [255, 0, 0]);
+    }
+
+    /// A 300 × 200 pt page under one `width` × `height` greyscale image, as a scanned drawing
+    /// sheet: a ramp crossed by dark grid lines, Flate-compressed in PNG Up rows.
+    fn scanned_sheet_pdf(width: usize, height: usize) -> Vec<u8> {
+        use std::io::Write;
+
+        let mut rows = Vec::with_capacity((width + 1) * height);
+        let mut above = vec![0u8; width];
+        for y in 0..height {
+            let row: Vec<u8> = (0..width).map(|x| if x % 50 == 0 || y % 40 == 0 { 0 } else { (x * 255 / width) as u8 }).collect();
+            rows.push(2);
+            rows.extend(row.iter().zip(&above).map(|(v, a)| v.wrapping_sub(*a)));
+            above = row;
+        }
+        let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(&rows).unwrap();
+        let compressed = encoder.finish().unwrap();
+        let content = "q 300 0 0 200 0 0 cm /Scan Do Q";
+        let mut pdf = format!(
+            "%PDF-1.7\n\
+1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n\
+2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj\n\
+3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 300 200] /Contents 4 0 R /Resources << /XObject << /Scan 5 0 R >> >> >> endobj\n\
+4 0 obj << /Length {} >> stream\n{content}\nendstream endobj\n\
+5 0 obj << /Type /XObject /Subtype /Image /Width {width} /Height {height} /ColorSpace /DeviceGray /BitsPerComponent 8 /Filter /FlateDecode /DecodeParms << /Predictor 15 /Columns {width} >> /Length {} >> stream\n",
+            content.len(),
+            compressed.len()
+        )
+        .into_bytes();
+        pdf.extend_from_slice(&compressed);
+        pdf.extend_from_slice(b"\nendstream endobj\ntrailer << /Root 1 0 R >>\n%%EOF\n");
+        pdf
+    }
+
+    /// A renderer keeps the images it decodes for its later renders, and a pool's workers decode
+    /// through one cache (vendored hayro-interpret patch: `SharedImageCache`). Each render, and
+    /// each worker, had a cache of its own, so every render decoded its page's images again.
+    #[test]
+    fn a_renderers_renders_share_their_decoded_images() {
+        let mut r = PageRenderer::new(Arc::new(scanned_sheet_pdf(600, 400)), RenderConfig::default());
+        for _ in 0..3 {
+            let page = r.render(RenderRequest { page: 0, scale: 1.0, ..Default::default() });
+            assert!(page.error.is_none(), "{:?}", page.error);
+        }
+        assert_eq!(r.images.decodes(), 1, "three renders of the page decode its scan once");
+    }
+
+    /// A page under a large scan decodes it once for all its tiles, zooms and previews (vendored
+    /// hayro-interpret patch: decoded images are kept by a renderer across its renders, keyed
+    /// without the decode target, which only JPEG 2000 reads, and without preview). The target,
+    /// measured from each tile's corner, made every tile and zoom decode the scan again: 2.3 s
+    /// apiece for the one behind page 41 of a 245 MB electrical set.
+    #[test]
+    fn a_large_image_is_decoded_once_for_all_tiles_zooms_and_previews() {
+        let mut r = PageRenderer::new(Arc::new(scanned_sheet_pdf(600, 400)), RenderConfig::default());
+        let mut render = |scale: f32, tile: Option<Tile>, preview: bool| {
+            let page = r.render(RenderRequest { page: 0, scale, tile, preview, ..Default::default() });
+            assert!(page.error.is_none(), "{:?}", page.error);
+            page
+        };
+        let at = |page: &RenderedPage, x: u32, y: u32| page.rgba[((y * page.width + x) * 4) as usize..][..4].to_vec();
+        let full = render(2.0, None, false);
+        for (x, y) in [(0, 0), (130, 0), (260, 170), (472, 304)] {
+            let tile = render(2.0, Some(Tile { x, y, w: 128, h: 96 }), false);
+            for ty in 0..96 {
+                for tx in 0..128 {
+                    assert_eq!(at(&tile, tx, ty), at(&full, x + tx, y + ty), "tile at {x},{y}: pixel {tx},{ty}");
+                }
+            }
+        }
+        render(0.5, None, true);
+        render(3.0, Some(Tile { x: 600, y: 400, w: 200, h: 200 }), false);
+        render(1.0, None, false);
+        assert_eq!(r.images.decodes(), 1, "the scan is decoded once for every tile, zoom and preview");
+    }
+
+    /// A JPEG 2000 image is decoded for the size it is drawn at, so its zooms keep their own
+    /// decodes, but every tile of one zoom shares one: the size is the image's on the device,
+    /// not the distance of its corners from the tile's origin, which differed for every tile.
+    #[test]
+    fn a_jpeg_2000_image_is_decoded_once_for_all_tiles_of_a_zoom() {
+        let mut r = PageRenderer::new(Arc::new(jpx_midpoint_pdf(8, 3)), RenderConfig::default());
+        for (x, y) in [(0, 0), (80, 0), (0, 80), (80, 80)] {
+            let page = r.render(RenderRequest { page: 0, scale: 4.0, tile: Some(Tile { x, y, w: 80, h: 80 }), ..Default::default() });
+            assert!(page.error.is_none(), "{:?}", page.error);
+        }
+        assert_eq!(r.images.decodes(), 1, "one decode for the four tiles at 400%");
+        let page = r.render(RenderRequest { page: 0, scale: 1.0, ..Default::default() });
+        assert!(page.error.is_none(), "{:?}", page.error);
+        assert_eq!(r.images.decodes(), 2, "another zoom asks for another size");
+    }
+
+    /// The decode target was the distance of an image's corners from the canvas origin, which is
+    /// zero for a mirrored image in the page's top-left corner, and the JPEG 2000 decoder divides
+    /// by it. The target is now at least one pixel.
+    #[test]
+    fn a_jpeg_2000_image_with_a_corner_on_the_canvas_origin_draws() {
+        let pdf = jpx_midpoint_page(8, 3, "q -20 0 0 20 20 20 cm /Im1 Do Q");
+        let mut r = PageRenderer::new(Arc::new(pdf), RenderConfig::default());
+        let page = r.render(RenderRequest { page: 0, scale: 1.0, ..Default::default() });
+        assert!(page.error.is_none(), "{:?}", page.error);
+        assert_eq!(&page.rgba[((10 * 40 + 10) * 4)..][..4], &[128, 128, 128, 255], "the image paints gray");
+    }
+
+    /// A pool's workers share one decoded-image cache, and while one decodes an image the
+    /// others wait for that decode: four workers rendering a page's tiles at once decode its scan
+    /// once. Each kept a cache of its own before and decoded the scan alongside the others, which
+    /// multiplied a large scan's memory by the workers.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_pools_workers_decode_a_shared_image_once() {
+        let pool = RenderPool::new(Arc::new(scanned_sheet_pdf(3000, 2000)), 4, RenderConfig::default());
+        let tiles: Vec<RenderRequest> = (0..8u32)
+            .map(|i| RenderRequest {
+                page: 0,
+                scale: 2.0,
+                tile: Some(Tile { x: (i % 4) * 150, y: (i / 4) * 200, w: 150, h: 200 }),
+                tag: u64::from(i),
+                ..Default::default()
+            })
+            .collect();
+        pool.set_queue(tiles);
+        for _ in 0..8 {
+            let page = receive_before_deadline(&pool);
+            assert!(page.error.is_none(), "{:?}", page.error);
+        }
+        assert_eq!(pool.shared.images.0.decodes(), 1, "the four workers decode the scan once between them");
+    }
+
+    /// A 200 × 150 pt page drawing one `width` × `height` image of `space` samples `pixels` with
+    /// `matrix`, under a same-sized soft mask of `mask` samples when given, all Flate-compressed.
+    fn drawn_image_pdf(space: &str, (width, height): (usize, usize), pixels: &[u8], mask: Option<&[u8]>, matrix: &str) -> Vec<u8> {
+        use std::io::Write;
+
+        let deflate = |data: &[u8]| {
+            let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
+            encoder.write_all(data).unwrap();
+            encoder.finish().unwrap()
+        };
+        let content = format!("q {matrix} cm /Im Do Q");
+        let image = deflate(pixels);
+        let smask = mask.map(deflate);
+        let smask_ref = if smask.is_some() { "/SMask 6 0 R" } else { "" };
+        let mut pdf = format!(
+            "%PDF-1.7\n\
+1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n\
+2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj\n\
+3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 200 150] /Contents 4 0 R /Resources << /XObject << /Im 5 0 R >> >> >> endobj\n\
+4 0 obj << /Length {} >> stream\n{content}\nendstream endobj\n\
+5 0 obj << /Type /XObject /Subtype /Image /Width {width} /Height {height} /ColorSpace /{space} /BitsPerComponent 8 {smask_ref} /Filter /FlateDecode /Length {} >> stream\n",
+            content.len(),
+            image.len()
+        )
+        .into_bytes();
+        pdf.extend_from_slice(&image);
+        pdf.extend_from_slice(b"\nendstream endobj\n");
+        if let Some(smask) = smask {
+            pdf.extend(
+                format!(
+                    "6 0 obj << /Type /XObject /Subtype /Image /Width {width} /Height {height} /ColorSpace /DeviceGray /BitsPerComponent 8 /Filter /FlateDecode /Length {} >> stream\n",
+                    smask.len()
+                )
+                .bytes(),
+            );
+            pdf.extend_from_slice(&smask);
+            pdf.extend_from_slice(b"\nendstream endobj\n");
+        }
+        pdf.extend_from_slice(b"trailer << /Root 1 0 R >>\n%%EOF\n");
+        pdf
+    }
+
+    /// An image is sampled only for the part of it a tile shows (vendored hayro patch). Every
+    /// tile of a large image matches the whole page pixel for pixel, the image shrunk or
+    /// enlarged, turned or skewed, opaque or under a soft mask, wherever a tile's edges cut it.
+    #[test]
+    fn tiles_of_large_images_match_the_whole_page() {
+        let (w, h) = (300usize, 200usize);
+        let (gray, rgb, mask) = (noise(w * h, 1), noise(w * h * 3, 2), noise(w * h, 3));
+        // Colour space, samples, soft mask, `cm` matrix and scale.
+        type Case<'a> = (&'a str, &'a [u8], Option<&'a [u8]>, &'a str, f32);
+        // Image edges fall between device pixel centres: one on a centre is antialiased either
+        // way by float noise, tiled or not.
+        let cases: [Case; 5] = [
+            ("DeviceGray", &gray, None, "190.3 0 0 140.3 5.1 5.2", 0.8),
+            ("DeviceRGB", &rgb, Some(&mask), "190.3 0 0 140.3 5.1 5.2", 0.6),
+            ("DeviceGray", &gray, None, "190.3 0 0 140.3 5.1 5.2", 3.3),
+            ("DeviceRGB", &rgb, Some(&mask), "0 140.3 -190.3 0 195.4 5.2", 2.1),
+            ("DeviceRGB", &rgb, None, "150.3 30.1 40.2 110.3 5.1 5.2", 1.7),
+        ];
+        for (space, pixels, alpha, matrix, scale) in cases {
+            let mut r = PageRenderer::new(Arc::new(drawn_image_pdf(space, (w, h), pixels, alpha, matrix)), RenderConfig::default());
+            let full = r.render(RenderRequest { page: 0, scale, ..Default::default() });
+            assert!(full.error.is_none(), "{:?}", full.error);
+            let (fw, fh) = (full.width, full.height);
+            // Tiles of odd sizes at odd offsets, so their edges cut the image anywhere.
+            for y in (0..fh).step_by(29) {
+                for x in (0..fw).step_by(37) {
+                    let tile = Tile { x, y, w: 37.min(fw - x), h: 29.min(fh - y) };
+                    let part = r.render(RenderRequest { page: 0, scale, tile: Some(tile), ..Default::default() });
+                    assert!(part.error.is_none(), "{:?}", part.error);
+                    for ty in 0..tile.h {
+                        for tx in 0..tile.w {
+                            let whole = &full.rgba[(((y + ty) * fw + x + tx) * 4) as usize..][..4];
+                            let tiled = &part.rgba[((ty * tile.w + tx) * 4) as usize..][..4];
+                            assert_eq!(tiled, whole, "{space} drawn {matrix} at {scale}: pixel {},{}", x + tx, y + ty);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// The window of an image a canvas shows: the canvas mapped back into the image's raster,
+    /// two raster pixels wider each way for the sampler, cut to the raster.
+    #[test]
+    fn image_windows_cover_what_the_canvas_shows_and_little_more() {
+        use hayro::image_window;
+        use kurbo::Affine;
+
+        let canvas = (512, 256);
+        // Two device pixels per raster pixel, the canvas 1000 px right and 600 px down of the
+        // raster's corner: it shows raster pixels 500..756 by 300..428 of 10000 × 8000.
+        assert_eq!(image_window(Affine::new([2.0, 0.0, 0.0, 2.0, -1000.0, -600.0]), (10_000, 8_000), canvas), Some((498, 298, 758, 430)));
+        // Turned a quarter: device x runs down the raster's rows, device y along its columns.
+        assert_eq!(image_window(Affine::new([0.0, 2.0, -2.0, 0.0, 300.0, 0.0]), (1_000, 1_000), canvas), Some((0, 0, 130, 152)));
+        // Wholly on the canvas: all of it. Wholly off: none of it.
+        assert_eq!(image_window(Affine::translate((10.0, 10.0)), (100, 100), canvas), Some((0, 0, 100, 100)));
+        assert_eq!(image_window(Affine::translate((600.0, 0.0)), (100, 100), canvas), None);
+        // A transform that can't be inverted keeps all of it; an empty raster has none.
+        assert_eq!(image_window(Affine::new([1.0, 1.0, 1.0, 1.0, 0.0, 0.0]), (100, 100), canvas), Some((0, 0, 100, 100)));
+        assert_eq!(image_window(Affine::IDENTITY, (0, 100), canvas), None);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_pools_workers_decode_through_the_pools_image_cache() {
+        let pool = RenderPool::new(Arc::new(scanned_sheet_pdf(600, 400)), 2, RenderConfig::default());
+        pool.set_queue(vec![RenderRequest { page: 0, scale: 1.0, ..Default::default() }]);
+        let page = receive_before_deadline(&pool);
+        assert!(page.error.is_none(), "{:?}", page.error);
+        assert_eq!(pool.shared.images.0.decodes(), 1, "the worker decoded the scan through the pool's cache");
     }
 
     /// A Japanese CID font that isn't embedded (Adobe-Japan1, as `HeiseiMin-W3` with

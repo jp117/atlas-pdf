@@ -11,6 +11,7 @@ use kurbo::{Affine, BezPath, Point, Rect, Shape, Vec2};
 use pic_scale::{
     ImageSize, ImageStore, ImageStoreMut, PicScaleError, Resampling, ResamplingFunction, Scaler,
 };
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::mem::size_of;
 use std::rc::Rc;
@@ -231,6 +232,154 @@ fn nearest_premultiplied_rgba(
                     .to_rgba8()
                     .to_u8_array(),
             );
+        }
+    }
+    Some(out)
+}
+
+/// PdfCraft patch: whole raster pixels `x0..x1` across and `y0..y1` down, the part of an image
+/// raster a canvas shows (see [`visible_window`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Window {
+    x0: u32,
+    y0: u32,
+    x1: u32,
+    y1: u32,
+}
+
+impl Window {
+    fn width(&self) -> u32 {
+        self.x1.saturating_sub(self.x0)
+    }
+
+    fn height(&self) -> u32 {
+        self.y1.saturating_sub(self.y0)
+    }
+}
+
+/// PdfCraft patch: raster pixels kept around the ones the canvas maps onto, for the sampler:
+/// bilinear sampling (`ImageQuality::Medium`) reads the next pixel, and a pixel centre may fall
+/// either side of a boundary.
+const WINDOW_MARGIN: f64 = 2.0;
+
+/// PdfCraft patch: the window of a raster of `size` pixels, drawn through `transform` (raster
+/// pixels to device pixels), that can reach a canvas of `canvas` device pixels: the canvas mapped
+/// back into the raster, grown by [`WINDOW_MARGIN`] and cut to the raster. The whole raster when
+/// the transform can't be inverted; `None` when no pixel of it reaches the canvas.
+fn visible_window(transform: &Affine, size: (u32, u32), canvas: (u16, u16)) -> Option<Window> {
+    let whole = Window {
+        x0: 0,
+        y0: 0,
+        x1: size.0,
+        y1: size.1,
+    };
+    if size.0 == 0 || size.1 == 0 {
+        return None;
+    }
+    let determinant = transform.determinant();
+    if !determinant.is_finite() || determinant.abs() < 1e-12 {
+        return Some(whole);
+    }
+    let inverse = transform.inverse();
+    let (width, height) = (f64::from(canvas.0), f64::from(canvas.1));
+    let corners = [(0.0, 0.0), (width, 0.0), (0.0, height), (width, height)]
+        .map(|(x, y)| inverse * Point::new(x, y));
+    if !corners.iter().all(|p| p.x.is_finite() && p.y.is_finite()) {
+        return Some(whole);
+    }
+    let (mut x0, mut y0, mut x1, mut y1) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
+    for p in corners {
+        (x0, y0, x1, y1) = (x0.min(p.x), y0.min(p.y), x1.max(p.x), y1.max(p.y));
+    }
+    // Finite and clamped to the raster, so the casts keep every value.
+    let cut = |v: f64, side: u32| v.clamp(0.0, f64::from(side)) as u32;
+    let window = Window {
+        x0: cut((x0 - WINDOW_MARGIN).floor(), size.0),
+        y0: cut((y0 - WINDOW_MARGIN).floor(), size.1),
+        x1: cut((x1 + WINDOW_MARGIN).ceil(), size.0),
+        y1: cut((y1 + WINDOW_MARGIN).ceil(), size.1),
+    };
+    (window.width() > 0 && window.height() > 0).then_some(window)
+}
+
+/// PdfCraft patch: [`visible_window`] as `(x0, y0, x1, y1)`, exported for PdfCraft's tests.
+#[doc(hidden)]
+pub fn image_window(
+    transform: Affine,
+    size: (u32, u32),
+    canvas: (u16, u16),
+) -> Option<(u32, u32, u32, u32)> {
+    visible_window(&transform, size, canvas).map(|w| (w.x0, w.y0, w.x1, w.y1))
+}
+
+/// PdfCraft patch: the premultiplied RGBA of `window` of an image of `source` pixels, colour
+/// `image` and alpha `alpha` (the same size, or opaque), resized to `target` by
+/// nearest-neighbour: the samples PicScale's nearest plan copies (see
+/// [`nearest_source_index`]), so the pixels a whole resize, RGBA conversion and premultiplication
+/// give there, for the window alone. An axis whose `target` is its `source` is copied as it is.
+/// `None` when the window doesn't fit the backend or its buffer can't be had.
+fn sample_window(
+    image: &ImageData,
+    alpha: Option<&LumaData>,
+    source: (u32, u32),
+    target: (u32, u32),
+    window: Window,
+) -> Option<Vec<u8>> {
+    let (samples, channels) = match image {
+        ImageData::Luma(luma) => (luma.data.as_slice(), 1),
+        ImageData::Rgb(rgb) => (rgb.data.as_slice(), 3),
+    };
+    let len = image_byte_len(window.width(), window.height(), 4, MAX_IMAGE_PIXELS)?;
+    let mut out = image_buffer(len)?;
+    let index = |source: u32, target: u32, i: u32| {
+        if source == target {
+            i as usize
+        } else {
+            nearest_source_index(source, target, i)
+        }
+    };
+    let columns: Vec<usize> = (window.x0..window.x1)
+        .map(|x| index(source.0, target.0, x))
+        .collect();
+    let row_len = source.0 as usize;
+    for y in window.y0..window.y1 {
+        let start = index(source.1, target.1, y).checked_mul(row_len)?;
+        let end = start.checked_add(row_len)?;
+        let row = samples.get(start.checked_mul(channels)?..end.checked_mul(channels)?)?;
+        let rgb = |x: usize| -> Option<[u8; 3]> {
+            match channels {
+                1 => row.get(x).map(|v| [*v; 3]),
+                _ => {
+                    let at = x.checked_mul(3)?;
+                    row.get(at..at.checked_add(3)?)?.try_into().ok()
+                }
+            }
+        };
+        match alpha {
+            None if channels == 1 => {
+                for &x in &columns {
+                    let v = *row.get(x)?;
+                    out.extend_from_slice(&[v, v, v, 255]);
+                }
+            }
+            None => {
+                for &x in &columns {
+                    let [r, g, b] = rgb(x)?;
+                    out.extend_from_slice(&[r, g, b, 255]);
+                }
+            }
+            Some(alpha) => {
+                let alpha = alpha.data.get(start..end)?;
+                for &x in &columns {
+                    let [r, g, b] = rgb(x)?;
+                    out.extend_from_slice(
+                        &AlphaColor::from_rgba8(r, g, b, *alpha.get(x)?)
+                            .premultiply()
+                            .to_rgba8()
+                            .to_u8_array(),
+                    );
+                }
+            }
         }
     }
     Some(out)
@@ -534,7 +683,7 @@ impl Renderer {
         reach
     }
 
-    fn draw_image_with_alpha_mask(&mut self, image_data: ImageData, mut alpha_data: LumaData) {
+    fn draw_image_with_alpha_mask(&mut self, image_data: &ImageData, alpha_data: &LumaData) {
         // PdfCraft patch: mismatched masks need a dummy RGB staging image. Validate and
         // reserve it before creating/pushing any mask, so failure skips the whole image.
         let Some(len) = source_byte_len(alpha_data.width, alpha_data.height, 3, MAX_IMAGE_PIXELS)
@@ -559,11 +708,19 @@ impl Renderer {
             // shape on its own (Word saves text as a tiny black image with a glyph-bitmap mask).
             // Shrunk by nearest-neighbour it keeps one sample in N and drops every stroke thinner
             // than N mask pixels, so a shrunk mask is filtered whatever its `/Interpolate`, which
-            // only asks for smoothing when the mask is enlarged.
+            // only asks for smoothing when the mask is enlarged. (The decoded mask is shared, so
+            // the flag is set on a copy.)
             let (x, y) = x_y_advances(&transform);
-            if x.length() < 1.0 || y.length() < 1.0 {
-                alpha_data.interpolate = true;
-            }
+            let shrunk_alpha;
+            let alpha_data = if (x.length() < 1.0 || y.length() < 1.0) && !alpha_data.interpolate {
+                shrunk_alpha = LumaData {
+                    interpolate: true,
+                    ..alpha_data.clone()
+                };
+                &shrunk_alpha
+            } else {
+                alpha_data
+            };
             let mut renderer = Self {
                 ctx: RenderContext::new_with(
                     self.ctx.width(),
@@ -594,7 +751,7 @@ impl Renderer {
             // Note that there is a circle between `draw_image` and `draw_image_with_alpha_mask`,
             // but `draw_image_with_alpha_mask` is only called if the dimensions or interpolate
             // values between alpha_data and rgb_data don't match, which they do here.
-            renderer.draw_image(rgb_data, Some(alpha_data));
+            renderer.draw_image(&rgb_data, Some(alpha_data));
             renderer.ctx.flush();
             let mut resources = vello_cpu::Resources::default();
             renderer.ctx.render_to_pixmap(&mut resources, &mut mask_pix);
@@ -608,16 +765,16 @@ impl Renderer {
         self.ctx.pop_layer();
     }
 
-    fn resize_image_data(
+    fn resize_image_data<'d>(
         &self,
-        data: Vec<u8>,
+        data: Cow<'d, [u8]>,
         src_width: u32,
         src_height: u32,
         new_width: u32,
         new_height: u32,
         pixel_format: ImagePixelFormat,
         interpolate: bool,
-    ) -> (Vec<u8>, u32, u32) {
+    ) -> (Cow<'d, [u8]>, u32, u32) {
         // PdfCraft patch (#624): `/Interpolate` governs the pre-minification pass too. Using
         // Catmull-Rom here for an image that did not request interpolation blends hard edges
         // before ImageQuality::Low gets a chance to sample it. Keep the pre-resize (and its
@@ -664,7 +821,7 @@ impl Renderer {
             ),
         };
         match resized {
-            Ok(out) => (out, new_width, new_height),
+            Ok(out) => (Cow::Owned(out), new_width, new_height),
             Err(original) => {
                 log::warn!(
                     "Image resampling failed or exceeded its buffer limit; falling back to source data"
@@ -674,11 +831,11 @@ impl Renderer {
         }
     }
 
-    fn resize_image_data_impl<const N: usize>(
+    fn resize_image_data_impl<'d, const N: usize>(
         &self,
         scaler: &Scaler,
         interpolate: bool,
-        data: Vec<u8>,
+        data: Cow<'d, [u8]>,
         src_width: u32,
         src_height: u32,
         new_width: u32,
@@ -688,9 +845,9 @@ impl Renderer {
             ImageSize,
             ImageSize,
         ) -> Result<Arc<Resampling<u8, N>>, PicScaleError>,
-    ) -> Result<Vec<u8>, Vec<u8>> {
+    ) -> Result<Vec<u8>, Cow<'d, [u8]>> {
         // PdfCraft patch: validate before constructing a plan or allocating its output/scratch.
-        // Returning the owned input preserves both its pixels and dimensions on any failure.
+        // Returning the input preserves both its pixels and dimensions on any failure.
         let resized = (|| {
             let len = resampling_byte_len(
                 (src_width, src_height),
@@ -737,7 +894,7 @@ impl Renderer {
         }
     }
 
-    fn draw_image(&mut self, image_data: ImageData, alpha_data: Option<LumaData>) {
+    fn draw_image(&mut self, image_data: &ImageData, alpha_data: Option<&LumaData>) {
         let cur_transform = *self.ctx.transform();
         let (x_scale, y_scale) = {
             let (x, y) = x_y_advances(&cur_transform);
@@ -754,11 +911,11 @@ impl Renderer {
             return;
         }
         let (source_width, source_height) = (image_data.width(), image_data.height());
-        let channels = match &image_data {
+        let channels = match image_data {
             ImageData::Luma(_) => 1,
             ImageData::Rgb(_) => 3,
         };
-        let data_len = match &image_data {
+        let data_len = match image_data {
             ImageData::Luma(a) => a.data.len(),
             ImageData::Rgb(a) => a.data.len(),
         };
@@ -769,16 +926,14 @@ impl Renderer {
             return;
         }
         let interpolate = image_data.interpolate();
-        if let Some(a) = &alpha_data {
+        if let Some(a) = alpha_data {
             if source_byte_len(a.width, a.height, 1, MAX_IMAGE_PIXELS) != Some(a.data.len()) {
                 log::warn!("Image has invalid or over-limit alpha dimensions/data and was skipped");
                 return;
             }
             if a.width != source_width || a.height != source_height || a.interpolate != interpolate
             {
-                if let Some(alpha) = alpha_data {
-                    self.draw_image_with_alpha_mask(image_data, alpha);
-                }
+                self.draw_image_with_alpha_mask(image_data, a);
                 return;
             }
         }
@@ -835,12 +990,60 @@ impl Renderer {
         let (new_width, new_height) = snapped.map_or((new_width, new_height), |s| (s.0, s.1));
         let needs_resize = (new_width, new_height) != (source_width, source_height);
 
+        // PdfCraft patch: an image drawn at its own pixels or shrunk by nearest-neighbour (no
+        // `/Interpolate`) is sampled for the part of it the canvas shows, straight from the
+        // decoded data into premultiplied RGBA: the pixels the whole resize, RGBA conversion and
+        // premultiplication below give there (`sample_window`). A tile of a page under a
+        // 12353 × 8999 scan resized and converted all of it (444 MB of RGBA at 400%) to show
+        // a corner. Filtered shrinking (Catmull-Rom) and Type 3 glyph images go the whole way.
+        if !self.in_type3_glyph && !(interpolate && needs_resize) {
+            if image_byte_len(new_width, new_height, 4, MAX_IMAGE_PIXELS).is_none() {
+                log::warn!(
+                    "Image resampling failed and the original resolution cannot fit the backend; image skipped"
+                );
+                return;
+            }
+            // Raster pixels (of the `new_width` × `new_height` resize) to device pixels.
+            let raster_transform = cur_transform
+                * Affine::scale_non_uniform(
+                    source_width as f64 / new_width as f64,
+                    source_height as f64 / new_height as f64,
+                );
+            let Some(window) = visible_window(
+                &raster_transform,
+                (new_width, new_height),
+                (self.ctx.width(), self.ctx.height()),
+            ) else {
+                return;
+            };
+            let Some(rgba) = sample_window(
+                image_data,
+                alpha_data,
+                (source_width, source_height),
+                (new_width, new_height),
+                window,
+            ) else {
+                log::warn!("Image pixels could not be sampled and the image was skipped");
+                return;
+            };
+            let pixmap = Pixmap::from_parts_with_opacity(
+                bytemuck::cast_vec(rgba),
+                window.width() as u16,
+                window.height() as u16,
+                may_have_transparency,
+            );
+            let window_transform =
+                raster_transform * Affine::translate((f64::from(window.x0), f64::from(window.y0)));
+            self.draw_pixmap(Arc::new(pixmap), quality, window_transform);
+            return;
+        }
+
         // PdfCraft patch (#624): a minified image with a soft mask that is not interpolated is
         // nearest-sampled straight into premultiplied target RGBA. That skips the full-resolution
         // RGBA copy below and the premultiply pass after it.
-        let direct = match &alpha_data {
+        let direct = match alpha_data {
             Some(alpha) if needs_resize && !interpolate => nearest_premultiplied_rgba(
-                &image_data,
+                image_data,
                 &alpha.data,
                 (source_width, source_height),
                 (new_width, new_height),
@@ -851,9 +1054,13 @@ impl Renderer {
         // Preserve the single-channel/RGB fast paths. With alpha, expand directly to RGBA;
         // every source and alpha length was validated before zipping or allocating.
         let (data, format) = match (direct, image_data, alpha_data) {
-            (Some(rgba), _, _) => (rgba, ImagePixelFormat::Rgba),
-            (None, ImageData::Luma(luma), None) => (luma.data, ImagePixelFormat::Luma),
-            (None, ImageData::Rgb(rgb), None) => (rgb.data, ImagePixelFormat::Rgb),
+            (Some(rgba), _, _) => (Cow::Owned(rgba), ImagePixelFormat::Rgba),
+            (None, ImageData::Luma(luma), None) => {
+                (Cow::Borrowed(luma.data.as_slice()), ImagePixelFormat::Luma)
+            }
+            (None, ImageData::Rgb(rgb), None) => {
+                (Cow::Borrowed(rgb.data.as_slice()), ImagePixelFormat::Rgb)
+            }
             (None, image, Some(alpha)) => {
                 let Some(len) = source_byte_len(source_width, source_height, 4, MAX_IMAGE_PIXELS)
                 else {
@@ -870,8 +1077,8 @@ impl Renderer {
                         rgba.extend(
                             luma.data
                                 .iter()
-                                .zip(alpha.data)
-                                .flat_map(|(g, a)| [*g, *g, *g, a]),
+                                .zip(&alpha.data)
+                                .flat_map(|(g, a)| [*g, *g, *g, *a]),
                         );
                     }
                     ImageData::Rgb(rgb) => {
@@ -880,12 +1087,12 @@ impl Renderer {
                                 .as_chunks::<3>()
                                 .0
                                 .iter()
-                                .zip(alpha.data)
-                                .flat_map(|([r, g, b], a)| [*r, *g, *b, a]),
+                                .zip(&alpha.data)
+                                .flat_map(|([r, g, b], a)| [*r, *g, *b, *a]),
                         );
                     }
                 }
-                (rgba, ImagePixelFormat::Rgba)
+                (Cow::Owned(rgba), ImagePixelFormat::Rgba)
             }
         };
         let (data, mut img_width, mut img_height) = if premultiplied {
@@ -914,7 +1121,7 @@ impl Renderer {
             source_height as f64 / img_height as f64,
         );
         let mut rgba_data = if matches!(format, ImagePixelFormat::Rgba) {
-            data
+            data.into_owned()
         } else {
             let Some(len) = image_byte_len(img_width, img_height, 4, MAX_IMAGE_PIXELS) else {
                 return;
@@ -1355,18 +1562,19 @@ impl<'a> Device<'a> for Renderer {
         self.ctx.set_paint_transform(Affine::IDENTITY);
         self.ctx.set_aliasing_threshold(Some(1));
 
-        let target_width = (transform * Point::new(image.width() as f64, 0.0))
-            .to_vec2()
-            .length()
-            .ceil() as u32;
-        let target_height = (transform * Point::new(0.0, image.height() as f64))
-            .to_vec2()
-            .length()
-            .ceil() as u32;
+        // PdfCraft patch: the decode target is the image's size on the device, the lengths its
+        // sides are drawn at. It was the distance of two of its corners from the canvas origin,
+        // which moves with the tile: tiles of one zoom never shared a decoded image, and a tile
+        // near an image's corner asked JPEG 2000 for a fraction of the resolution the image is
+        // drawn at. At least one pixel each way (JPEG 2000 divides by it, and NaN becomes 1).
+        let (x_axis, y_axis) = x_y_advances(&transform);
+        let side =
+            |axis: Vec2, pixels: u32| (axis.length() * f64::from(pixels)).ceil().max(1.0) as u32;
+        let target_width = side(x_axis, image.width());
+        let target_height = side(y_axis, image.height());
 
         // PdfCraft patch: previews skip images that would cover only a few device pixels.
-        // Final renders always draw them. (Measured as axis lengths: the `target_*` above
-        // map a point, so they include the translation and only suit the decode hint.)
+        // Final renders always draw them.
         if self.preview {
             let c = transform.as_coeffs();
             let tiny_w = (f64::from(image.width()) * (c[0] * c[0] + c[1] * c[1]).sqrt()).ceil() as u32;
@@ -1425,7 +1633,7 @@ impl<'a> Device<'a> for Renderer {
                                     interpolate: stencil.interpolate,
                                     scale_factors: stencil.scale_factors,
                                 });
-                                self.draw_image(rgb_data, Some(stencil));
+                                self.draw_image(&rgb_data, Some(stencil));
 
                                 if push_layer {
                                     self.ctx.pop_layer();
@@ -1475,7 +1683,7 @@ impl<'a> Device<'a> for Renderer {
                                     };
                                     let mut sub_pix = Pixmap::new(width, height);
                                     sub_renderer.ctx.set_transform(transform);
-                                    sub_renderer.draw_image(rgb_bytes, Some(stencil));
+                                    sub_renderer.draw_image(&rgb_bytes, Some(stencil));
                                     sub_renderer.ctx.flush();
                                     let mut resources = vello_cpu::Resources::default();
                                     sub_renderer
