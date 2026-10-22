@@ -5818,6 +5818,22 @@ endstream endobj
         assert_eq!(r.images.decodes(), 1, "the scan is decoded once for every tile, zoom and preview");
     }
 
+    /// A JPEG 2000 image is decoded for the size it is drawn at, so its zooms keep their own
+    /// decodes, but every tile of one zoom shares one: the size is the image's on the device,
+    /// not the distance of its corners from the tile's origin, which differed for every tile.
+    #[test]
+    fn a_jpeg_2000_image_is_decoded_once_for_all_tiles_of_a_zoom() {
+        let mut r = PageRenderer::new(Arc::new(jpx_midpoint_pdf(8, 3)), RenderConfig::default());
+        for (x, y) in [(0, 0), (80, 0), (0, 80), (80, 80)] {
+            let page = r.render(RenderRequest { page: 0, scale: 4.0, tile: Some(Tile { x, y, w: 80, h: 80 }), ..Default::default() });
+            assert!(page.error.is_none(), "{:?}", page.error);
+        }
+        assert_eq!(r.images.decodes(), 1, "one decode for the four tiles at 400%");
+        let page = r.render(RenderRequest { page: 0, scale: 1.0, ..Default::default() });
+        assert!(page.error.is_none(), "{:?}", page.error);
+        assert_eq!(r.images.decodes(), 2, "another zoom asks for another size");
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn a_pools_workers_decode_through_the_pools_image_cache() {

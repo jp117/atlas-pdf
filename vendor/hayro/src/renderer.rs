@@ -1366,18 +1366,19 @@ impl<'a> Device<'a> for Renderer {
         self.ctx.set_paint_transform(Affine::IDENTITY);
         self.ctx.set_aliasing_threshold(Some(1));
 
-        let target_width = (transform * Point::new(image.width() as f64, 0.0))
-            .to_vec2()
-            .length()
-            .ceil() as u32;
-        let target_height = (transform * Point::new(0.0, image.height() as f64))
-            .to_vec2()
-            .length()
-            .ceil() as u32;
+        // PdfCraft patch: the decode target is the image's size on the device, the lengths its
+        // sides are drawn at. It was the distance of two of its corners from the canvas origin,
+        // which moves with the tile: tiles of one zoom never shared a decoded image, and a tile
+        // near an image's corner asked JPEG 2000 for a fraction of the resolution the image is
+        // drawn at. At least one pixel each way (JPEG 2000 divides by it, and NaN becomes 1).
+        let (x_axis, y_axis) = x_y_advances(&transform);
+        let side =
+            |axis: Vec2, pixels: u32| (axis.length() * f64::from(pixels)).ceil().max(1.0) as u32;
+        let target_width = side(x_axis, image.width());
+        let target_height = side(y_axis, image.height());
 
         // PdfCraft patch: previews skip images that would cover only a few device pixels.
-        // Final renders always draw them. (Measured as axis lengths: the `target_*` above
-        // map a point, so they include the translation and only suit the decode hint.)
+        // Final renders always draw them.
         if self.preview {
             let c = transform.as_coeffs();
             let tiny_w = (f64::from(image.width()) * (c[0] * c[0] + c[1] * c[1]).sqrt()).ceil() as u32;
