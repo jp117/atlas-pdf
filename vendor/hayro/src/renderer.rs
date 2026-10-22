@@ -11,6 +11,7 @@ use kurbo::{Affine, BezPath, Point, Rect, Shape, Vec2};
 use pic_scale::{
     ImageSize, ImageStore, ImageStoreMut, PicScaleError, Resampling, ResamplingFunction, Scaler,
 };
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::mem::size_of;
 use std::rc::Rc;
@@ -534,7 +535,7 @@ impl Renderer {
         reach
     }
 
-    fn draw_image_with_alpha_mask(&mut self, image_data: ImageData, mut alpha_data: LumaData) {
+    fn draw_image_with_alpha_mask(&mut self, image_data: &ImageData, alpha_data: &LumaData) {
         // PdfCraft patch: mismatched masks need a dummy RGB staging image. Validate and
         // reserve it before creating/pushing any mask, so failure skips the whole image.
         let Some(len) = source_byte_len(alpha_data.width, alpha_data.height, 3, MAX_IMAGE_PIXELS)
@@ -559,11 +560,19 @@ impl Renderer {
             // shape on its own (Word saves text as a tiny black image with a glyph-bitmap mask).
             // Shrunk by nearest-neighbour it keeps one sample in N and drops every stroke thinner
             // than N mask pixels, so a shrunk mask is filtered whatever its `/Interpolate`, which
-            // only asks for smoothing when the mask is enlarged.
+            // only asks for smoothing when the mask is enlarged. (The decoded mask is shared, so
+            // the flag is set on a copy.)
             let (x, y) = x_y_advances(&transform);
-            if x.length() < 1.0 || y.length() < 1.0 {
-                alpha_data.interpolate = true;
-            }
+            let shrunk_alpha;
+            let alpha_data = if (x.length() < 1.0 || y.length() < 1.0) && !alpha_data.interpolate {
+                shrunk_alpha = LumaData {
+                    interpolate: true,
+                    ..alpha_data.clone()
+                };
+                &shrunk_alpha
+            } else {
+                alpha_data
+            };
             let mut renderer = Self {
                 ctx: RenderContext::new_with(
                     self.ctx.width(),
@@ -594,7 +603,7 @@ impl Renderer {
             // Note that there is a circle between `draw_image` and `draw_image_with_alpha_mask`,
             // but `draw_image_with_alpha_mask` is only called if the dimensions or interpolate
             // values between alpha_data and rgb_data don't match, which they do here.
-            renderer.draw_image(rgb_data, Some(alpha_data));
+            renderer.draw_image(&rgb_data, Some(alpha_data));
             renderer.ctx.flush();
             let mut resources = vello_cpu::Resources::default();
             renderer.ctx.render_to_pixmap(&mut resources, &mut mask_pix);
@@ -608,16 +617,16 @@ impl Renderer {
         self.ctx.pop_layer();
     }
 
-    fn resize_image_data(
+    fn resize_image_data<'d>(
         &self,
-        data: Vec<u8>,
+        data: Cow<'d, [u8]>,
         src_width: u32,
         src_height: u32,
         new_width: u32,
         new_height: u32,
         pixel_format: ImagePixelFormat,
         interpolate: bool,
-    ) -> (Vec<u8>, u32, u32) {
+    ) -> (Cow<'d, [u8]>, u32, u32) {
         // PdfCraft patch (#624): `/Interpolate` governs the pre-minification pass too. Using
         // Catmull-Rom here for an image that did not request interpolation blends hard edges
         // before ImageQuality::Low gets a chance to sample it. Keep the pre-resize (and its
@@ -664,7 +673,7 @@ impl Renderer {
             ),
         };
         match resized {
-            Ok(out) => (out, new_width, new_height),
+            Ok(out) => (Cow::Owned(out), new_width, new_height),
             Err(original) => {
                 log::warn!(
                     "Image resampling failed or exceeded its buffer limit; falling back to source data"
@@ -674,11 +683,11 @@ impl Renderer {
         }
     }
 
-    fn resize_image_data_impl<const N: usize>(
+    fn resize_image_data_impl<'d, const N: usize>(
         &self,
         scaler: &Scaler,
         interpolate: bool,
-        data: Vec<u8>,
+        data: Cow<'d, [u8]>,
         src_width: u32,
         src_height: u32,
         new_width: u32,
@@ -688,9 +697,9 @@ impl Renderer {
             ImageSize,
             ImageSize,
         ) -> Result<Arc<Resampling<u8, N>>, PicScaleError>,
-    ) -> Result<Vec<u8>, Vec<u8>> {
+    ) -> Result<Vec<u8>, Cow<'d, [u8]>> {
         // PdfCraft patch: validate before constructing a plan or allocating its output/scratch.
-        // Returning the owned input preserves both its pixels and dimensions on any failure.
+        // Returning the input preserves both its pixels and dimensions on any failure.
         let resized = (|| {
             let len = resampling_byte_len(
                 (src_width, src_height),
@@ -737,7 +746,7 @@ impl Renderer {
         }
     }
 
-    fn draw_image(&mut self, image_data: ImageData, alpha_data: Option<LumaData>) {
+    fn draw_image(&mut self, image_data: &ImageData, alpha_data: Option<&LumaData>) {
         let cur_transform = *self.ctx.transform();
         let (x_scale, y_scale) = {
             let (x, y) = x_y_advances(&cur_transform);
@@ -754,11 +763,11 @@ impl Renderer {
             return;
         }
         let (source_width, source_height) = (image_data.width(), image_data.height());
-        let channels = match &image_data {
+        let channels = match image_data {
             ImageData::Luma(_) => 1,
             ImageData::Rgb(_) => 3,
         };
-        let data_len = match &image_data {
+        let data_len = match image_data {
             ImageData::Luma(a) => a.data.len(),
             ImageData::Rgb(a) => a.data.len(),
         };
@@ -769,16 +778,14 @@ impl Renderer {
             return;
         }
         let interpolate = image_data.interpolate();
-        if let Some(a) = &alpha_data {
+        if let Some(a) = alpha_data {
             if source_byte_len(a.width, a.height, 1, MAX_IMAGE_PIXELS) != Some(a.data.len()) {
                 log::warn!("Image has invalid or over-limit alpha dimensions/data and was skipped");
                 return;
             }
             if a.width != source_width || a.height != source_height || a.interpolate != interpolate
             {
-                if let Some(alpha) = alpha_data {
-                    self.draw_image_with_alpha_mask(image_data, alpha);
-                }
+                self.draw_image_with_alpha_mask(image_data, a);
                 return;
             }
         }
@@ -838,9 +845,9 @@ impl Renderer {
         // PdfCraft patch (#624): a minified image with a soft mask that is not interpolated is
         // nearest-sampled straight into premultiplied target RGBA. That skips the full-resolution
         // RGBA copy below and the premultiply pass after it.
-        let direct = match &alpha_data {
+        let direct = match alpha_data {
             Some(alpha) if needs_resize && !interpolate => nearest_premultiplied_rgba(
-                &image_data,
+                image_data,
                 &alpha.data,
                 (source_width, source_height),
                 (new_width, new_height),
@@ -851,9 +858,13 @@ impl Renderer {
         // Preserve the single-channel/RGB fast paths. With alpha, expand directly to RGBA;
         // every source and alpha length was validated before zipping or allocating.
         let (data, format) = match (direct, image_data, alpha_data) {
-            (Some(rgba), _, _) => (rgba, ImagePixelFormat::Rgba),
-            (None, ImageData::Luma(luma), None) => (luma.data, ImagePixelFormat::Luma),
-            (None, ImageData::Rgb(rgb), None) => (rgb.data, ImagePixelFormat::Rgb),
+            (Some(rgba), _, _) => (Cow::Owned(rgba), ImagePixelFormat::Rgba),
+            (None, ImageData::Luma(luma), None) => {
+                (Cow::Borrowed(luma.data.as_slice()), ImagePixelFormat::Luma)
+            }
+            (None, ImageData::Rgb(rgb), None) => {
+                (Cow::Borrowed(rgb.data.as_slice()), ImagePixelFormat::Rgb)
+            }
             (None, image, Some(alpha)) => {
                 let Some(len) = source_byte_len(source_width, source_height, 4, MAX_IMAGE_PIXELS)
                 else {
@@ -870,8 +881,8 @@ impl Renderer {
                         rgba.extend(
                             luma.data
                                 .iter()
-                                .zip(alpha.data)
-                                .flat_map(|(g, a)| [*g, *g, *g, a]),
+                                .zip(&alpha.data)
+                                .flat_map(|(g, a)| [*g, *g, *g, *a]),
                         );
                     }
                     ImageData::Rgb(rgb) => {
@@ -880,12 +891,12 @@ impl Renderer {
                                 .as_chunks::<3>()
                                 .0
                                 .iter()
-                                .zip(alpha.data)
-                                .flat_map(|([r, g, b], a)| [*r, *g, *b, a]),
+                                .zip(&alpha.data)
+                                .flat_map(|([r, g, b], a)| [*r, *g, *b, *a]),
                         );
                     }
                 }
-                (rgba, ImagePixelFormat::Rgba)
+                (Cow::Owned(rgba), ImagePixelFormat::Rgba)
             }
         };
         let (data, mut img_width, mut img_height) = if premultiplied {
@@ -914,7 +925,7 @@ impl Renderer {
             source_height as f64 / img_height as f64,
         );
         let mut rgba_data = if matches!(format, ImagePixelFormat::Rgba) {
-            data
+            data.into_owned()
         } else {
             let Some(len) = image_byte_len(img_width, img_height, 4, MAX_IMAGE_PIXELS) else {
                 return;
@@ -1425,7 +1436,7 @@ impl<'a> Device<'a> for Renderer {
                                     interpolate: stencil.interpolate,
                                     scale_factors: stencil.scale_factors,
                                 });
-                                self.draw_image(rgb_data, Some(stencil));
+                                self.draw_image(&rgb_data, Some(stencil));
 
                                 if push_layer {
                                     self.ctx.pop_layer();
@@ -1475,7 +1486,7 @@ impl<'a> Device<'a> for Renderer {
                                     };
                                     let mut sub_pix = Pixmap::new(width, height);
                                     sub_renderer.ctx.set_transform(transform);
-                                    sub_renderer.draw_image(rgb_bytes, Some(stencil));
+                                    sub_renderer.draw_image(&rgb_bytes, Some(stencil));
                                     sub_renderer.ctx.flush();
                                     let mut resources = vello_cpu::Resources::default();
                                     sub_renderer

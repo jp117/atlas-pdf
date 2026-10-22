@@ -51,10 +51,10 @@ impl Cache {
 
 /// PdfCraft patch: a byte-budgeted cache of decoded images, keyed by everything a decode reads
 /// ([`DecodedImageKey`]). Image-heavy pages decode thousands of images; without this every tile
-/// and every scale decodes them all again. Entries hold owned pixels, so a hit never changes
-/// them; when an insert would pass the budget the whole map is dropped (a fresh epoch), which
-/// only costs re-decoding, and an image larger than the whole budget is never kept. The budget
-/// caps memory per interpreter cache. A poisoned lock decodes without the cache.
+/// and every scale decodes them all again. Entries are shared (`Arc`), so a hit lends the pixels
+/// without copying them; when an insert would pass the budget the whole map is dropped (a fresh
+/// epoch), which only costs re-decoding, and an image larger than the whole budget is never kept.
+/// The budget caps memory per interpreter cache. A poisoned lock decodes without the cache.
 #[derive(Clone)]
 pub(crate) struct DecodedImageCache {
     inner: Arc<Mutex<DecodedImageCacheInner>>,
@@ -93,7 +93,7 @@ pub(crate) struct DecodedImageKey {
 
 #[derive(Default)]
 struct DecodedImageCacheInner {
-    map: HashMap<DecodedImageKey, Option<Box<dyn Any + Send + Sync>>>,
+    map: HashMap<DecodedImageKey, Option<Arc<dyn Any + Send + Sync>>>,
     bytes: usize,
 }
 
@@ -115,42 +115,41 @@ impl DecodedImageCache {
 
     /// The decoded image for `key`, from the cache or from `f`. `None` as the key decodes
     /// without the cache.
-    pub(crate) fn get_or_insert_with<T: Clone + Send + Sync + 'static>(
+    pub(crate) fn get_or_insert_with<T: Send + Sync + 'static>(
         &self,
         key: Option<DecodedImageKey>,
         budget: usize,
         size_of: impl FnOnce(&T) -> usize,
         f: impl FnOnce() -> Option<T>,
-    ) -> Option<T> {
-        let Some(key) = key else { return f() };
-        // Fast path: a hit clones the pixels without decoding.
+    ) -> Option<Arc<T>> {
+        let Some(key) = key else {
+            return f().map(Arc::new);
+        };
+        // Fast path: a hit shares the pixels without decoding.
         let hit = match self.inner.lock() {
             Ok(locked) => locked
                 .map
                 .get(&key)
-                .and_then(|val| val.as_ref())
-                .and_then(|val| val.downcast_ref::<T>().cloned()),
+                .and_then(|val| val.clone())
+                .and_then(|val| val.downcast::<T>().ok()),
             // A thread panicked while holding the lock: decode without the cache.
-            Err(_) => return f(),
+            Err(_) => return f().map(Arc::new),
         };
         if let Some(hit) = hit {
             return Some(hit);
         }
         // Miss: decode without holding the lock (decoding must never deadlock the cache).
-        let val = f();
+        let val = f().map(Arc::new);
         let Ok(mut locked) = self.inner.lock() else {
             return val;
         };
         // Another thread may have decoded it meanwhile: keep the first copy.
         if let Some(existing) = locked.map.get(&key)
-            && let Some(existing) = existing.as_ref().and_then(|val| val.downcast_ref::<T>())
+            && let Some(existing) = existing.clone().and_then(|val| val.downcast::<T>().ok())
         {
-            return Some(existing.clone());
+            return Some(existing);
         }
-        let size = match &val {
-            Some(v) => size_of(v),
-            None => 0,
-        };
+        let size = val.as_deref().map_or(0, size_of);
         if size > budget {
             return val;
         }
@@ -161,8 +160,7 @@ impl DecodedImageCache {
         locked.bytes = locked.bytes.saturating_add(size);
         locked.map.insert(
             key,
-            val.clone()
-                .map(|val| Box::new(val) as Box<dyn Any + Send + Sync>),
+            val.clone().map(|val| val as Arc<dyn Any + Send + Sync>),
         );
         val
     }

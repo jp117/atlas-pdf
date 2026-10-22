@@ -100,7 +100,7 @@ impl Device<'_> for ImageExtractor {
                 r.with_rgba(
                     |image, alpha| {
                         let (rgb_data, width, height) = match image {
-                            ImageData::Rgb(rgb) => (rgb.data, rgb.width, rgb.height),
+                            ImageData::Rgb(rgb) => (rgb.data.clone(), rgb.width, rgb.height),
                             ImageData::Luma(luma) => {
                                 let rgb = luma
                                     .data
@@ -117,8 +117,8 @@ impl Device<'_> for ImageExtractor {
                             if alpha.width == width && alpha.height == height {
                                 let interleaved = rgb_data
                                     .chunks(3)
-                                    .zip(alpha.data)
-                                    .flat_map(|(rgb, a)| [rgb[0], rgb[1], rgb[2], a])
+                                    .zip(&alpha.data)
+                                    .flat_map(|(rgb, a)| [rgb[0], rgb[1], rgb[2], *a])
                                     .collect::<Vec<u8>>();
 
                                 DynamicImage::ImageRgba8(

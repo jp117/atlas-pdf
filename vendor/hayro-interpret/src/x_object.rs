@@ -23,6 +23,7 @@ use smallvec::{SmallVec, smallvec};
 use std::borrow::Cow;
 use std::iter;
 use std::ops::Deref;
+use std::sync::Arc;
 
 pub(crate) enum XObject<'a> {
     FormXObject(FormXObject<'a>),
@@ -347,14 +348,17 @@ impl<'a> ImageXObject<'a> {
         })
     }
 
-    pub(crate) fn decoded_mask(&self, target_dimension: Option<(u32, u32)>) -> Option<DecodedMask> {
+    pub(crate) fn decoded_mask(
+        &self,
+        target_dimension: Option<(u32, u32)>,
+    ) -> Option<Arc<DecodedMask>> {
         if !self.is_mask {
             return None;
         }
 
         // PdfCraft patch: decode once per `DecodedImageKey`; tiles and scales share it.
         let Some(cache) = &self.decoded_cache else {
-            return decode_mask(self, target_dimension);
+            return decode_mask(self, target_dimension).map(Arc::new);
         };
         cache.get_or_insert_with(
             self.decode_key(cache, true, target_dimension),
@@ -367,14 +371,14 @@ impl<'a> ImageXObject<'a> {
     pub(crate) fn decoded_raster(
         &self,
         target_dimension: Option<(u32, u32)>,
-    ) -> Option<DecodedRaster> {
+    ) -> Option<Arc<DecodedRaster>> {
         if self.is_mask {
             return None;
         }
 
         // PdfCraft patch: decode once per `DecodedImageKey`; tiles and scales share it.
         let Some(cache) = &self.decoded_cache else {
-            return decode_raster(self, target_dimension);
+            return decode_raster(self, target_dimension).map(Arc::new);
         };
         cache.get_or_insert_with(
             self.decode_key(cache, false, target_dimension),
