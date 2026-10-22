@@ -5834,6 +5834,31 @@ endstream endobj
         assert_eq!(r.images.decodes(), 2, "another zoom asks for another size");
     }
 
+    /// A pool's workers share one decoded-image cache, and while one decodes an image the
+    /// others wait for that decode: four workers rendering a page's tiles at once decode its scan
+    /// once. Each kept a cache of its own before and decoded the scan alongside the others, which
+    /// multiplied a large scan's memory by the workers.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_pools_workers_decode_a_shared_image_once() {
+        let pool = RenderPool::new(Arc::new(scanned_sheet_pdf(3000, 2000)), 4, RenderConfig::default());
+        let tiles: Vec<RenderRequest> = (0..8u32)
+            .map(|i| RenderRequest {
+                page: 0,
+                scale: 2.0,
+                tile: Some(Tile { x: (i % 4) * 150, y: (i / 4) * 200, w: 150, h: 200 }),
+                tag: u64::from(i),
+                ..Default::default()
+            })
+            .collect();
+        pool.set_queue(tiles);
+        for _ in 0..8 {
+            let page = receive_before_deadline(&pool);
+            assert!(page.error.is_none(), "{:?}", page.error);
+        }
+        assert_eq!(pool.shared.images.0.decodes(), 1, "the four workers decode the scan once between them");
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn a_pools_workers_decode_through_the_pools_image_cache() {
