@@ -237,6 +237,154 @@ fn nearest_premultiplied_rgba(
     Some(out)
 }
 
+/// PdfCraft patch: whole raster pixels `x0..x1` across and `y0..y1` down, the part of an image
+/// raster a canvas shows (see [`visible_window`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Window {
+    x0: u32,
+    y0: u32,
+    x1: u32,
+    y1: u32,
+}
+
+impl Window {
+    fn width(&self) -> u32 {
+        self.x1.saturating_sub(self.x0)
+    }
+
+    fn height(&self) -> u32 {
+        self.y1.saturating_sub(self.y0)
+    }
+}
+
+/// PdfCraft patch: raster pixels kept around the ones the canvas maps onto, for the sampler:
+/// bilinear sampling (`ImageQuality::Medium`) reads the next pixel, and a pixel centre may fall
+/// either side of a boundary.
+const WINDOW_MARGIN: f64 = 2.0;
+
+/// PdfCraft patch: the window of a raster of `size` pixels, drawn through `transform` (raster
+/// pixels to device pixels), that can reach a canvas of `canvas` device pixels: the canvas mapped
+/// back into the raster, grown by [`WINDOW_MARGIN`] and cut to the raster. The whole raster when
+/// the transform can't be inverted; `None` when no pixel of it reaches the canvas.
+fn visible_window(transform: &Affine, size: (u32, u32), canvas: (u16, u16)) -> Option<Window> {
+    let whole = Window {
+        x0: 0,
+        y0: 0,
+        x1: size.0,
+        y1: size.1,
+    };
+    if size.0 == 0 || size.1 == 0 {
+        return None;
+    }
+    let determinant = transform.determinant();
+    if !determinant.is_finite() || determinant.abs() < 1e-12 {
+        return Some(whole);
+    }
+    let inverse = transform.inverse();
+    let (width, height) = (f64::from(canvas.0), f64::from(canvas.1));
+    let corners = [(0.0, 0.0), (width, 0.0), (0.0, height), (width, height)]
+        .map(|(x, y)| inverse * Point::new(x, y));
+    if !corners.iter().all(|p| p.x.is_finite() && p.y.is_finite()) {
+        return Some(whole);
+    }
+    let (mut x0, mut y0, mut x1, mut y1) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
+    for p in corners {
+        (x0, y0, x1, y1) = (x0.min(p.x), y0.min(p.y), x1.max(p.x), y1.max(p.y));
+    }
+    // Finite and clamped to the raster, so the casts keep every value.
+    let cut = |v: f64, side: u32| v.clamp(0.0, f64::from(side)) as u32;
+    let window = Window {
+        x0: cut((x0 - WINDOW_MARGIN).floor(), size.0),
+        y0: cut((y0 - WINDOW_MARGIN).floor(), size.1),
+        x1: cut((x1 + WINDOW_MARGIN).ceil(), size.0),
+        y1: cut((y1 + WINDOW_MARGIN).ceil(), size.1),
+    };
+    (window.width() > 0 && window.height() > 0).then_some(window)
+}
+
+/// PdfCraft patch: [`visible_window`] as `(x0, y0, x1, y1)`, exported for PdfCraft's tests.
+#[doc(hidden)]
+pub fn image_window(
+    transform: Affine,
+    size: (u32, u32),
+    canvas: (u16, u16),
+) -> Option<(u32, u32, u32, u32)> {
+    visible_window(&transform, size, canvas).map(|w| (w.x0, w.y0, w.x1, w.y1))
+}
+
+/// PdfCraft patch: the premultiplied RGBA of `window` of an image of `source` pixels, colour
+/// `image` and alpha `alpha` (the same size, or opaque), resized to `target` by
+/// nearest-neighbour: the samples PicScale's nearest plan copies (see
+/// [`nearest_source_index`]), so the pixels a whole resize, RGBA conversion and premultiplication
+/// give there, for the window alone. An axis whose `target` is its `source` is copied as it is.
+/// `None` when the window doesn't fit the backend or its buffer can't be had.
+fn sample_window(
+    image: &ImageData,
+    alpha: Option<&LumaData>,
+    source: (u32, u32),
+    target: (u32, u32),
+    window: Window,
+) -> Option<Vec<u8>> {
+    let (samples, channels) = match image {
+        ImageData::Luma(luma) => (luma.data.as_slice(), 1),
+        ImageData::Rgb(rgb) => (rgb.data.as_slice(), 3),
+    };
+    let len = image_byte_len(window.width(), window.height(), 4, MAX_IMAGE_PIXELS)?;
+    let mut out = image_buffer(len)?;
+    let index = |source: u32, target: u32, i: u32| {
+        if source == target {
+            i as usize
+        } else {
+            nearest_source_index(source, target, i)
+        }
+    };
+    let columns: Vec<usize> = (window.x0..window.x1)
+        .map(|x| index(source.0, target.0, x))
+        .collect();
+    let row_len = source.0 as usize;
+    for y in window.y0..window.y1 {
+        let start = index(source.1, target.1, y).checked_mul(row_len)?;
+        let end = start.checked_add(row_len)?;
+        let row = samples.get(start.checked_mul(channels)?..end.checked_mul(channels)?)?;
+        let rgb = |x: usize| -> Option<[u8; 3]> {
+            match channels {
+                1 => row.get(x).map(|v| [*v; 3]),
+                _ => {
+                    let at = x.checked_mul(3)?;
+                    row.get(at..at.checked_add(3)?)?.try_into().ok()
+                }
+            }
+        };
+        match alpha {
+            None if channels == 1 => {
+                for &x in &columns {
+                    let v = *row.get(x)?;
+                    out.extend_from_slice(&[v, v, v, 255]);
+                }
+            }
+            None => {
+                for &x in &columns {
+                    let [r, g, b] = rgb(x)?;
+                    out.extend_from_slice(&[r, g, b, 255]);
+                }
+            }
+            Some(alpha) => {
+                let alpha = alpha.data.get(start..end)?;
+                for &x in &columns {
+                    let [r, g, b] = rgb(x)?;
+                    out.extend_from_slice(
+                        &AlphaColor::from_rgba8(r, g, b, *alpha.get(x)?)
+                            .premultiply()
+                            .to_rgba8()
+                            .to_u8_array(),
+                    );
+                }
+            }
+        }
+    }
+    Some(out)
+}
+
 /// PdfCraft patch: most pieces one dashed stroke may be cut into. Stroke expansion keeps every
 /// dash, so a pattern that is tiny next to its path asks for billions: a fuzzed `/D [[11] 0]` on
 /// a line from x = 92234775807 allocated over 5 GB, and `[0.000001] 0 d` on a 20 pt line over
@@ -841,6 +989,54 @@ impl Renderer {
         };
         let (new_width, new_height) = snapped.map_or((new_width, new_height), |s| (s.0, s.1));
         let needs_resize = (new_width, new_height) != (source_width, source_height);
+
+        // PdfCraft patch: an image drawn at its own pixels or shrunk by nearest-neighbour (no
+        // `/Interpolate`) is sampled for the part of it the canvas shows, straight from the
+        // decoded data into premultiplied RGBA: the pixels the whole resize, RGBA conversion and
+        // premultiplication below give there (`sample_window`). A tile of a page under a
+        // 12353 × 8999 scan resized and converted all of it (444 MB of RGBA at 400%) to show
+        // a corner. Filtered shrinking (Catmull-Rom) and Type 3 glyph images go the whole way.
+        if !self.in_type3_glyph && !(interpolate && needs_resize) {
+            if image_byte_len(new_width, new_height, 4, MAX_IMAGE_PIXELS).is_none() {
+                log::warn!(
+                    "Image resampling failed and the original resolution cannot fit the backend; image skipped"
+                );
+                return;
+            }
+            // Raster pixels (of the `new_width` × `new_height` resize) to device pixels.
+            let raster_transform = cur_transform
+                * Affine::scale_non_uniform(
+                    source_width as f64 / new_width as f64,
+                    source_height as f64 / new_height as f64,
+                );
+            let Some(window) = visible_window(
+                &raster_transform,
+                (new_width, new_height),
+                (self.ctx.width(), self.ctx.height()),
+            ) else {
+                return;
+            };
+            let Some(rgba) = sample_window(
+                image_data,
+                alpha_data,
+                (source_width, source_height),
+                (new_width, new_height),
+                window,
+            ) else {
+                log::warn!("Image pixels could not be sampled and the image was skipped");
+                return;
+            };
+            let pixmap = Pixmap::from_parts_with_opacity(
+                bytemuck::cast_vec(rgba),
+                window.width() as u16,
+                window.height() as u16,
+                may_have_transparency,
+            );
+            let window_transform =
+                raster_transform * Affine::translate((f64::from(window.x0), f64::from(window.y0)));
+            self.draw_pixmap(Arc::new(pixmap), quality, window_transform);
+            return;
+        }
 
         // PdfCraft patch (#624): a minified image with a soft mask that is not interpolated is
         // nearest-sampled straight into premultiplied target RGBA. That skips the full-resolution

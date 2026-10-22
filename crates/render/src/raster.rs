@@ -5859,6 +5859,110 @@ endstream endobj
         assert_eq!(pool.shared.images.0.decodes(), 1, "the four workers decode the scan once between them");
     }
 
+    /// A 200 × 150 pt page drawing one `width` × `height` image of `space` samples `pixels` with
+    /// `matrix`, under a same-sized soft mask of `mask` samples when given, all Flate-compressed.
+    fn drawn_image_pdf(space: &str, (width, height): (usize, usize), pixels: &[u8], mask: Option<&[u8]>, matrix: &str) -> Vec<u8> {
+        use std::io::Write;
+
+        let deflate = |data: &[u8]| {
+            let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
+            encoder.write_all(data).unwrap();
+            encoder.finish().unwrap()
+        };
+        let content = format!("q {matrix} cm /Im Do Q");
+        let image = deflate(pixels);
+        let smask = mask.map(deflate);
+        let smask_ref = if smask.is_some() { "/SMask 6 0 R" } else { "" };
+        let mut pdf = format!(
+            "%PDF-1.7\n\
+1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n\
+2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj\n\
+3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 200 150] /Contents 4 0 R /Resources << /XObject << /Im 5 0 R >> >> >> endobj\n\
+4 0 obj << /Length {} >> stream\n{content}\nendstream endobj\n\
+5 0 obj << /Type /XObject /Subtype /Image /Width {width} /Height {height} /ColorSpace /{space} /BitsPerComponent 8 {smask_ref} /Filter /FlateDecode /Length {} >> stream\n",
+            content.len(),
+            image.len()
+        )
+        .into_bytes();
+        pdf.extend_from_slice(&image);
+        pdf.extend_from_slice(b"\nendstream endobj\n");
+        if let Some(smask) = smask {
+            pdf.extend(
+                format!(
+                    "6 0 obj << /Type /XObject /Subtype /Image /Width {width} /Height {height} /ColorSpace /DeviceGray /BitsPerComponent 8 /Filter /FlateDecode /Length {} >> stream\n",
+                    smask.len()
+                )
+                .bytes(),
+            );
+            pdf.extend_from_slice(&smask);
+            pdf.extend_from_slice(b"\nendstream endobj\n");
+        }
+        pdf.extend_from_slice(b"trailer << /Root 1 0 R >>\n%%EOF\n");
+        pdf
+    }
+
+    /// An image is sampled only for the part of it a tile shows (vendored hayro patch). Every
+    /// tile of a large image matches the whole page pixel for pixel, the image shrunk or
+    /// enlarged, turned or skewed, opaque or under a soft mask, wherever a tile's edges cut it.
+    #[test]
+    fn tiles_of_large_images_match_the_whole_page() {
+        let (w, h) = (300usize, 200usize);
+        let (gray, rgb, mask) = (noise(w * h, 1), noise(w * h * 3, 2), noise(w * h, 3));
+        // Colour space, samples, soft mask, `cm` matrix and scale.
+        type Case<'a> = (&'a str, &'a [u8], Option<&'a [u8]>, &'a str, f32);
+        // Image edges fall between device pixel centres: one on a centre is antialiased either
+        // way by float noise, tiled or not.
+        let cases: [Case; 5] = [
+            ("DeviceGray", &gray, None, "190.3 0 0 140.3 5.1 5.2", 0.8),
+            ("DeviceRGB", &rgb, Some(&mask), "190.3 0 0 140.3 5.1 5.2", 0.6),
+            ("DeviceGray", &gray, None, "190.3 0 0 140.3 5.1 5.2", 3.3),
+            ("DeviceRGB", &rgb, Some(&mask), "0 140.3 -190.3 0 195.4 5.2", 2.1),
+            ("DeviceRGB", &rgb, None, "150.3 30.1 40.2 110.3 5.1 5.2", 1.7),
+        ];
+        for (space, pixels, alpha, matrix, scale) in cases {
+            let mut r = PageRenderer::new(Arc::new(drawn_image_pdf(space, (w, h), pixels, alpha, matrix)), RenderConfig::default());
+            let full = r.render(RenderRequest { page: 0, scale, ..Default::default() });
+            assert!(full.error.is_none(), "{:?}", full.error);
+            let (fw, fh) = (full.width, full.height);
+            // Tiles of odd sizes at odd offsets, so their edges cut the image anywhere.
+            for y in (0..fh).step_by(29) {
+                for x in (0..fw).step_by(37) {
+                    let tile = Tile { x, y, w: 37.min(fw - x), h: 29.min(fh - y) };
+                    let part = r.render(RenderRequest { page: 0, scale, tile: Some(tile), ..Default::default() });
+                    assert!(part.error.is_none(), "{:?}", part.error);
+                    for ty in 0..tile.h {
+                        for tx in 0..tile.w {
+                            let whole = &full.rgba[(((y + ty) * fw + x + tx) * 4) as usize..][..4];
+                            let tiled = &part.rgba[((ty * tile.w + tx) * 4) as usize..][..4];
+                            assert_eq!(tiled, whole, "{space} drawn {matrix} at {scale}: pixel {},{}", x + tx, y + ty);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// The window of an image a canvas shows: the canvas mapped back into the image's raster,
+    /// two raster pixels wider each way for the sampler, cut to the raster.
+    #[test]
+    fn image_windows_cover_what_the_canvas_shows_and_little_more() {
+        use hayro::image_window;
+        use kurbo::Affine;
+
+        let canvas = (512, 256);
+        // Two device pixels per raster pixel, the canvas 1000 px right and 600 px down of the
+        // raster's corner: it shows raster pixels 500..756 by 300..428 of 10000 × 8000.
+        assert_eq!(image_window(Affine::new([2.0, 0.0, 0.0, 2.0, -1000.0, -600.0]), (10_000, 8_000), canvas), Some((498, 298, 758, 430)));
+        // Turned a quarter: device x runs down the raster's rows, device y along its columns.
+        assert_eq!(image_window(Affine::new([0.0, 2.0, -2.0, 0.0, 300.0, 0.0]), (1_000, 1_000), canvas), Some((0, 0, 130, 152)));
+        // Wholly on the canvas: all of it. Wholly off: none of it.
+        assert_eq!(image_window(Affine::translate((10.0, 10.0)), (100, 100), canvas), Some((0, 0, 100, 100)));
+        assert_eq!(image_window(Affine::translate((600.0, 0.0)), (100, 100), canvas), None);
+        // A transform that can't be inverted keeps all of it; an empty raster has none.
+        assert_eq!(image_window(Affine::new([1.0, 1.0, 1.0, 1.0, 0.0, 0.0]), (100, 100), canvas), Some((0, 0, 100, 100)));
+        assert_eq!(image_window(Affine::IDENTITY, (0, 100), canvas), None);
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn a_pools_workers_decode_through_the_pools_image_cache() {
