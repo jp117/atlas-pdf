@@ -59,9 +59,6 @@ impl Cache {
 #[derive(Clone)]
 pub(crate) struct DecodedImageCache {
     inner: Arc<Mutex<DecodedImageCacheInner>>,
-    /// Whether the render this handle serves is a preview (`InterpreterSettings::preview`).
-    /// Part of every key, so a preview's entries are never handed to a final render.
-    pub(crate) preview: bool,
 }
 
 /// PdfCraft patch: what a decoded image depends on. Two images share an entry only when all of
@@ -72,12 +69,15 @@ pub(crate) struct DecodedImageCache {
 ///   would not; the data stays put for as long as the document (and so this cache) lives;
 /// - the dictionary's bytes (`dict_hash`: `/Decode`, `/ColorSpace`, `/SMask`, `/Mask`,
 ///   `/BitsPerComponent`, filters, …) and its object (`obj`: the decryption key depends on it);
-/// - whether it is decoded as a mask, a stencil mask, raster or mask output, interpolation,
-///   the decode target size, and preview or final quality.
+/// - whether it is decoded as a mask, a stencil mask, raster or mask output, interpolation, and
+///   the decode target size where the decode reads it (JPEG 2000 only, see
+///   `ImageXObject::decode_key`).
 ///
 /// A transfer function (graphics state `/TR`) also changes the pixels and has no cheap key, so
 /// an image drawn under one is not cached; neither is an inline image, whose dictionary lives in
 /// a content stream and whose colour space can be a name resolved through the resources.
+/// Previews decode exactly as final renders do (they only skip drawing tiny images), so the two
+/// share entries.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct DecodedImageKey {
     pub(crate) mask_output: bool,
@@ -89,7 +89,6 @@ pub(crate) struct DecodedImageKey {
     pub(crate) is_stencil_mask: bool,
     pub(crate) interpolate: bool,
     pub(crate) target: Option<(u32, u32)>,
-    pub(crate) preview: bool,
 }
 
 struct DecodedImageCacheInner {
@@ -118,15 +117,6 @@ impl DecodedImageCache {
                 budget,
                 decodes: 0,
             })),
-            preview: false,
-        }
-    }
-
-    /// The same cache, for a preview (`true`) or a final render.
-    pub(crate) fn for_render(&self, preview: bool) -> Self {
-        Self {
-            inner: self.inner.clone(),
-            preview,
         }
     }
 

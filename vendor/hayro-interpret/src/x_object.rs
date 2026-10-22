@@ -8,6 +8,7 @@ use crate::interpret::state::ActiveTransferFunction;
 use crate::{BlendMode, CacheKey, ClipPath, Image, RasterImage, StencilImage};
 use crate::{FillRule, InterpreterWarning, WarningSinkFn, interpret};
 use crate::{ImageData, LumaData, RgbData};
+use hayro_syntax::Filter;
 use hayro_syntax::bit_reader::BitReader;
 use hayro_syntax::content::TypedIter;
 use hayro_syntax::object::Array;
@@ -361,7 +362,7 @@ impl<'a> ImageXObject<'a> {
             return decode_mask(self, target_dimension).map(Arc::new);
         };
         cache.get_or_insert_with(
-            self.decode_key(cache, true, target_dimension),
+            self.decode_key(true, target_dimension),
             decoded_mask_size,
             || decode_mask(self, target_dimension),
         )
@@ -380,7 +381,7 @@ impl<'a> ImageXObject<'a> {
             return decode_raster(self, target_dimension).map(Arc::new);
         };
         cache.get_or_insert_with(
-            self.decode_key(cache, false, target_dimension),
+            self.decode_key(false, target_dimension),
             decoded_raster_size,
             || decode_raster(self, target_dimension),
         )
@@ -391,7 +392,6 @@ impl<'a> ImageXObject<'a> {
     /// of them can't be keyed cheaply (a transfer function): such a decode isn't cached.
     pub(crate) fn decode_key(
         &self,
-        cache: &DecodedImageCache,
         mask_output: bool,
         target_dimension: Option<(u32, u32)>,
     ) -> Option<DecodedImageKey> {
@@ -409,9 +409,21 @@ impl<'a> ImageXObject<'a> {
             is_mask: self.is_mask,
             is_stencil_mask: self.is_stencil_mask,
             interpolate: self.interpolate,
-            target: target_dimension,
-            preview: cache.preview,
+            // Every other decoder ignores the target, and it changes with each scale: keyed
+            // only where it is read, a page's images are decoded once for all its zooms.
+            target: target_dimension.filter(|_| self.decodes_at_target()),
         })
+    }
+
+    /// PdfCraft patch: whether decoding this image reads the target size. Only JPEG 2000 does
+    /// (it skips resolution levels the target doesn't need), for the image itself or for the
+    /// soft mask or mask decoded with it.
+    fn decodes_at_target(&self) -> bool {
+        let jpx = |stream: &Stream<'_>| stream.filters().contains(&Filter::JpxDecode);
+        let dict = self.stream.dict();
+        jpx(&self.stream)
+            || dict.get::<Stream<'_>>(SMASK).is_some_and(|s| jpx(&s))
+            || dict.get::<Stream<'_>>(MASK).is_some_and(|s| jpx(&s))
     }
 
     pub(crate) fn width(&self) -> u32 {

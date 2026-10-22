@@ -5696,7 +5696,7 @@ endstream endobj
     /// Two images whose dictionaries are byte for byte the same (uncompressed, one size) but
     /// whose pixels differ each draw their own: the decoded-image cache tells them apart by the
     /// stream, not by the dictionary's bytes alone, in one render and across renders sharing a
-    /// cache, and previews never hand their entries to a final render.
+    /// cache, and a final render after a preview that shared its cache matches a fresh one.
     #[test]
     fn decoded_images_with_identical_dictionaries_keep_their_own_pixels() {
         let pdf = image_cache_pdf(
@@ -5787,6 +5787,35 @@ endstream endobj
             assert!(page.error.is_none(), "{:?}", page.error);
         }
         assert_eq!(r.images.decodes(), 1, "three renders of the page decode its scan once");
+    }
+
+    /// A page under a large scan decodes it once for all its tiles, zooms and previews (vendored
+    /// hayro-interpret patch: decoded images are kept by a renderer across its renders, keyed
+    /// without the decode target, which only JPEG 2000 reads, and without preview). The target,
+    /// measured from each tile's corner, made every tile and zoom decode the scan again: 2.3 s
+    /// apiece for the one behind page 41 of a 245 MB electrical set.
+    #[test]
+    fn a_large_image_is_decoded_once_for_all_tiles_zooms_and_previews() {
+        let mut r = PageRenderer::new(Arc::new(scanned_sheet_pdf(600, 400)), RenderConfig::default());
+        let mut render = |scale: f32, tile: Option<Tile>, preview: bool| {
+            let page = r.render(RenderRequest { page: 0, scale, tile, preview, ..Default::default() });
+            assert!(page.error.is_none(), "{:?}", page.error);
+            page
+        };
+        let at = |page: &RenderedPage, x: u32, y: u32| page.rgba[((y * page.width + x) * 4) as usize..][..4].to_vec();
+        let full = render(2.0, None, false);
+        for (x, y) in [(0, 0), (130, 0), (260, 170), (472, 304)] {
+            let tile = render(2.0, Some(Tile { x, y, w: 128, h: 96 }), false);
+            for ty in 0..96 {
+                for tx in 0..128 {
+                    assert_eq!(at(&tile, tx, ty), at(&full, x + tx, y + ty), "tile at {x},{y}: pixel {tx},{ty}");
+                }
+            }
+        }
+        render(0.5, None, true);
+        render(3.0, Some(Tile { x: 600, y: 400, w: 200, h: 200 }), false);
+        render(1.0, None, false);
+        assert_eq!(r.images.decodes(), 1, "the scan is decoded once for every tile, zoom and preview");
     }
 
     #[cfg(not(target_arch = "wasm32"))]
