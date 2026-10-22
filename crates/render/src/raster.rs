@@ -3514,6 +3514,145 @@ trailer << /Root 1 0 R >>
         }
     }
 
+    /// The decoded data of a Flate stream of `encoded` with `/DecodeParms << params >>`.
+    fn predicted_stream(params: &str, encoded: &[u8]) -> Vec<u8> {
+        use hayro_syntax::object::{FromBytes, Object};
+        use std::io::Write;
+
+        let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(encoded).unwrap();
+        let compressed = encoder.finish().unwrap();
+        let mut bytes = format!("<< /Filter /FlateDecode /DecodeParms << {params} >> /Length {} >> stream\n", compressed.len()).into_bytes();
+        bytes.extend_from_slice(&compressed);
+        bytes.extend_from_slice(b"\nendstream");
+        let Object::Stream(stream) = Object::from_bytes(&bytes).unwrap() else { panic!("stream expected") };
+        stream.decoded().unwrap().into_owned()
+    }
+
+    /// PNG's row filters undone the plainest way, byte by byte as the PNG specification reads:
+    /// the oracle for the decoder. `data` is rows of a filter type byte and `row_len` bytes.
+    fn png_unfiltered(data: &[u8], row_len: usize, bpp: usize) -> Vec<u8> {
+        let mut out: Vec<u8> = Vec::new();
+        for (r, row) in data.chunks_exact(row_len + 1).enumerate() {
+            let start = r * row_len;
+            for i in 0..row_len {
+                let a = if i >= bpp { out[start + i - bpp] } else { 0 };
+                let b = if r > 0 { out[start - row_len + i] } else { 0 };
+                let c = if r > 0 && i >= bpp { out[start - row_len + i - bpp] } else { 0 };
+                let predicted = match row[0] {
+                    1 => a,
+                    2 => b,
+                    3 => ((u16::from(a) + u16::from(b)) / 2) as u8,
+                    4 => {
+                        let p = i16::from(a) + i16::from(b) - i16::from(c);
+                        let (pa, pb, pc) = ((p - i16::from(a)).abs(), (p - i16::from(b)).abs(), (p - i16::from(c)).abs());
+                        if pa <= pb && pa <= pc {
+                            a
+                        } else if pb <= pc {
+                            b
+                        } else {
+                            c
+                        }
+                    }
+                    _ => 0,
+                };
+                out.push(row[i + 1].wrapping_add(predicted));
+            }
+        }
+        out
+    }
+
+    /// Deterministic bytes covering every value, for the predictor oracles.
+    fn noise(len: usize, seed: u32) -> Vec<u8> {
+        let mut state = seed.wrapping_mul(0x9e37_79b9) | 1;
+        (0..len)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 17;
+                state ^= state << 5;
+                (state >> 24) as u8
+            })
+            .collect()
+    }
+
+    /// PNG predictors are undone a row at a time on whole bytes (vendored hayro-syntax patch). Every
+    /// filter type, at every bit depth, colour count and width, decodes as the specification reads,
+    /// including rows that end inside a pixel (4-bit RGB of odd width): their last byte was dropped
+    /// and every later row started early.
+    #[test]
+    fn png_predictors_decode_every_filter_type_at_every_depth_and_width() {
+        let mut seed = 0;
+        for bpc in [1usize, 2, 4, 8, 16] {
+            for colors in 1usize..=4 {
+                for columns in [1usize, 2, 3, 7] {
+                    let row_len = (columns * bpc * colors).div_ceil(8);
+                    let bpp = (bpc * colors).div_ceil(8);
+                    seed += 1;
+                    // Every filter type, an unknown one (5) and a row cut short at the end.
+                    let mut encoded = noise(7 * (row_len + 1) + row_len / 2, seed);
+                    for (row, tag) in encoded.chunks_exact_mut(row_len + 1).zip([0u8, 1, 2, 3, 4, 5, 2]) {
+                        row[0] = tag;
+                    }
+                    let params = format!("/Predictor 15 /Colors {colors} /BitsPerComponent {bpc} /Columns {columns}");
+                    assert_eq!(
+                        predicted_stream(&params, &encoded),
+                        png_unfiltered(&encoded, row_len, bpp),
+                        "{bpc}-bit, {colors} colours, {columns} columns"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The TIFF predictor on 8-bit samples adds the pixel to the left, as PNG's Sub does.
+    #[test]
+    fn tiff_predictor_of_eight_bit_samples_adds_the_pixel_to_the_left() {
+        for colors in 1usize..=4 {
+            let row_len = 5 * colors;
+            let encoded = noise(3 * row_len + 2, colors as u32);
+            let tagged: Vec<u8> = encoded.chunks_exact(row_len).flat_map(|row| std::iter::once(1).chain(row.iter().copied())).collect();
+            let params = format!("/Predictor 2 /Colors {colors} /BitsPerComponent 8 /Columns 5");
+            assert_eq!(predicted_stream(&params, &encoded), png_unfiltered(&tagged, row_len, colors), "{colors} colours");
+        }
+    }
+
+    /// A PNG-predicted 4-bit RGB image three pixels wide: its rows are five bytes, the last one
+    /// half a pixel. That byte was dropped, so the first row ended in the wrong blue and the
+    /// second started a byte early (blue, black, black instead of red, green, blue).
+    #[test]
+    fn png_predicted_rows_ending_inside_a_pixel_render_every_pixel() {
+        use std::io::Write;
+
+        // Rows (1,2,3) (4,5,6) (7,8,9) and (15,0,0) (0,15,0) (0,0,15) in 4-bit samples, each
+        // filtered with PNG's Sub over two-byte pixels.
+        let encoded = [1, 0x12, 0x34, 0x44, 0x44, 0x3a, 1, 0xf0, 0x00, 0x00, 0x00, 0x00];
+        let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(&encoded).unwrap();
+        let compressed = encoder.finish().unwrap();
+        let content = "q 30 0 0 20 0 0 cm /Im1 Do Q";
+        let mut pdf = format!(
+            "%PDF-1.7\n\
+1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n\
+2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj\n\
+3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 30 20] /Contents 4 0 R /Resources << /XObject << /Im1 5 0 R >> >> >> endobj\n\
+4 0 obj << /Length {} >> stream\n{content}\nendstream endobj\n\
+5 0 obj << /Type /XObject /Subtype /Image /Width 3 /Height 2 /ColorSpace /DeviceRGB /BitsPerComponent 4 /Filter /FlateDecode /DecodeParms << /Predictor 15 /Colors 3 /BitsPerComponent 4 /Columns 3 >> /Length {} >> stream\n",
+            content.len(),
+            compressed.len()
+        )
+        .into_bytes();
+        pdf.extend_from_slice(&compressed);
+        pdf.extend_from_slice(b"\nendstream endobj\ntrailer << /Root 1 0 R >>\n%%EOF\n");
+        let mut renderer = PageRenderer::new(Arc::new(pdf), RenderConfig::default());
+        let page = renderer.render(RenderRequest { page: 0, kind: RequestKind::Pixels, scale: 1.0, ..Default::default() });
+        assert!(page.error.is_none(), "{:?}", page.error);
+        assert_eq!((page.width, page.height), (30, 20));
+        let pixel = |x: usize, y: usize| <[u8; 4]>::try_from(&page.rgba[((y * 10 + 5) * 30 + x * 10 + 5) * 4..][..4]).unwrap();
+        // 4-bit samples scale by 17 to 8 bits.
+        assert_eq!([pixel(0, 0), pixel(1, 0), pixel(2, 0)], [[17, 34, 51, 255], [68, 85, 102, 255], [119, 136, 153, 255]]);
+        assert_eq!([pixel(0, 1), pixel(1, 1), pixel(2, 1)], [[255, 0, 0, 255], [0, 255, 0, 255], [0, 0, 255, 255]]);
+    }
+
     #[test]
     fn tiff_predictor_packed_rgb_image_renders_every_row() {
         use std::io::Write;

@@ -1013,6 +1013,18 @@ fn apply_predictor(data: Vec<u8>, params: &PredictorParams) -> Option<Vec<u8>> {
             } else {
                 (params.bits_per_component, params.colors as usize)
             };
+            // PdfCraft patch: PNG predictors work on whole bytes at any bit depth, and the TIFF
+            // predictor does at 8 bits per component, so both are undone on plain byte rows
+            // (`unpredict_rows`). The general path below moves every sample through bit readers
+            // and writers: a 12353 × 8999 greyscale drawing took 2.3 s to undo, on every render
+            // of the page. It also dropped the last bytes of a PNG row that isn't a whole number
+            // of pixels (4-bit RGB of odd width) and shifted every row after it.
+            if is_png_predictor {
+                return Some(unpredict_rows(&data, row_len, chunk_len, true));
+            }
+            if i == 2 && params.bits_per_component == 8 {
+                return Some(unpredict_rows(&data, row_len, chunk_len, false));
+            }
             let zero_row = vec![0; row_len];
             let mut prev_row = BitChunks::new(&zero_row, bit_size, chunk_len)?;
             let zero_col = BitChunk::new(0, chunk_len);
@@ -1097,6 +1109,167 @@ fn apply_predictor(data: Vec<u8>, params: &PredictorParams) -> Option<Vec<u8>> {
 
             Some(out)
         }
+    }
+}
+
+/// PdfCraft patch: undoes a predictor on whole bytes, a row at a time. With `png`, every row of
+/// `data` starts with its PNG filter type, applied as PNG defines it (ISO 32000-2 §7.4.4.4): to
+/// the byte `bpp` to the left and the one above, both zero off the image. Without, every row is
+/// a TIFF predictor 2 row of 8-bit samples, `bpp` per pixel, which is PNG's Sub. A last row cut
+/// short is dropped and an unknown PNG filter type leaves its row as it is, as the general path
+/// in [`apply_predictor`] does.
+fn unpredict_rows(data: &[u8], row_len: usize, bpp: usize, png: bool) -> Vec<u8> {
+    let in_len = if png {
+        row_len.saturating_add(1)
+    } else {
+        row_len
+    };
+    if row_len == 0 || bpp == 0 || in_len > data.len() {
+        return Vec::new();
+    }
+    // At most `data.len()` bytes: every output row is read from at least as many input bytes.
+    let rows = data.len() / in_len;
+    let mut out = vec![0; rows.saturating_mul(row_len)];
+    let zero_row = vec![0; row_len];
+    let mut above: &[u8] = &zero_row;
+    for (row, cur) in data.chunks_exact(in_len).zip(out.chunks_exact_mut(row_len)) {
+        let (filter, src) = if png {
+            match row.split_first() {
+                Some((filter, src)) => (*filter, src),
+                None => break,
+            }
+        } else {
+            (1, row)
+        };
+        match filter {
+            1 => unpredict_sub(cur, src, bpp),
+            2 => unpredict_up(cur, src, above),
+            3 => unpredict_average(cur, src, above, bpp),
+            4 => unpredict_paeth(cur, src, above, bpp),
+            _ => {
+                for (c, s) in cur.iter_mut().zip(src) {
+                    *c = *s;
+                }
+            }
+        }
+        above = cur;
+    }
+    out
+}
+
+/// PdfCraft patch: PNG's Sub, `cur = src + left`.
+fn unpredict_sub(cur: &mut [u8], src: &[u8], bpp: usize) {
+    if bpp == 1 {
+        let mut left = 0u8;
+        for (c, s) in cur.iter_mut().zip(src) {
+            left = s.wrapping_add(left);
+            *c = left;
+        }
+        return;
+    }
+    let mut cur = cur.chunks_mut(bpp);
+    let mut src = src.chunks(bpp);
+    let (Some(first), Some(first_src)) = (cur.next(), src.next()) else {
+        return;
+    };
+    for (c, s) in first.iter_mut().zip(first_src) {
+        *c = *s;
+    }
+    let mut left: &[u8] = first;
+    for (cur, src) in cur.zip(src) {
+        for ((c, s), l) in cur.iter_mut().zip(src).zip(left) {
+            *c = s.wrapping_add(*l);
+        }
+        left = cur;
+    }
+}
+
+/// PdfCraft patch: PNG's Up, `cur = src + above`.
+fn unpredict_up(cur: &mut [u8], src: &[u8], above: &[u8]) {
+    for ((c, s), a) in cur.iter_mut().zip(src).zip(above) {
+        *c = s.wrapping_add(*a);
+    }
+}
+
+/// PdfCraft patch: the mean of two bytes, rounded down, as PNG's Average takes it.
+fn mean(a: u8, b: u8) -> u8 {
+    // At most 255: the cast keeps every bit.
+    ((u16::from(a) + u16::from(b)) / 2) as u8
+}
+
+/// PdfCraft patch: PNG's Average, `cur = src + ⌊(left + above) / 2⌋`.
+fn unpredict_average(cur: &mut [u8], src: &[u8], above: &[u8], bpp: usize) {
+    if bpp == 1 {
+        let mut left = 0u8;
+        for ((c, s), a) in cur.iter_mut().zip(src).zip(above) {
+            left = s.wrapping_add(mean(left, *a));
+            *c = left;
+        }
+        return;
+    }
+    let mut cur = cur.chunks_mut(bpp);
+    let mut src = src.chunks(bpp);
+    let mut above = above.chunks(bpp);
+    let (Some(first), Some(first_src), Some(first_above)) = (cur.next(), src.next(), above.next())
+    else {
+        return;
+    };
+    for ((c, s), a) in first.iter_mut().zip(first_src).zip(first_above) {
+        *c = s.wrapping_add(a / 2);
+    }
+    let mut left: &[u8] = first;
+    for ((cur, src), above) in cur.zip(src).zip(above) {
+        for (((c, s), a), l) in cur.iter_mut().zip(src).zip(above).zip(left) {
+            *c = s.wrapping_add(mean(*l, *a));
+        }
+        left = cur;
+    }
+}
+
+/// PdfCraft patch: PNG's Paeth predictor of a byte from the one to its `left`, the one `above`
+/// and the one above that to the left: whichever is closest to `left + above - above_left`.
+fn paeth_predictor(left: u8, above: u8, above_left: u8) -> u8 {
+    let (a, b, c) = (i16::from(left), i16::from(above), i16::from(above_left));
+    let p = a + b - c;
+    let (pa, pb, pc) = ((p - a).abs(), (p - b).abs(), (p - c).abs());
+    if pa <= pb && pa <= pc {
+        left
+    } else if pb <= pc {
+        above
+    } else {
+        above_left
+    }
+}
+
+/// PdfCraft patch: PNG's Paeth, `cur = src + paeth_predictor(left, above, above_left)`.
+fn unpredict_paeth(cur: &mut [u8], src: &[u8], above: &[u8], bpp: usize) {
+    if bpp == 1 {
+        let (mut left, mut above_left) = (0u8, 0u8);
+        for ((c, s), a) in cur.iter_mut().zip(src).zip(above) {
+            left = s.wrapping_add(paeth_predictor(left, *a, above_left));
+            above_left = *a;
+            *c = left;
+        }
+        return;
+    }
+    let mut cur = cur.chunks_mut(bpp);
+    let mut src = src.chunks(bpp);
+    let mut above = above.chunks(bpp);
+    let (Some(first), Some(first_src), Some(first_above)) = (cur.next(), src.next(), above.next())
+    else {
+        return;
+    };
+    // Nothing to the left: the predictor is the byte above.
+    for ((c, s), a) in first.iter_mut().zip(first_src).zip(first_above) {
+        *c = s.wrapping_add(*a);
+    }
+    let (mut left, mut above_left): (&[u8], &[u8]) = (first, first_above);
+    for ((cur, src), above) in cur.zip(src).zip(above) {
+        for ((((c, s), a), l), al) in cur.iter_mut().zip(src).zip(above).zip(left).zip(above_left) {
+            *c = s.wrapping_add(paeth_predictor(*l, *a, *al));
+        }
+        left = cur;
+        above_left = above;
     }
 }
 
@@ -1305,5 +1478,134 @@ mod tests {
                 4, 3, 1, 252, 5, 253, 6, 1, 229, 254,
             ],
         );
+    }
+
+    /// PdfCraft patch: PNG's filters undone the plainest way, byte by byte from the specification,
+    /// as the oracle for the row-wise `unpredict_rows`.
+    fn png_reference(data: &[u8], row_len: usize, bpp: usize) -> Vec<u8> {
+        let mut out: Vec<u8> = Vec::new();
+        for (r, row) in data.chunks_exact(row_len + 1).enumerate() {
+            let start = r * row_len;
+            for i in 0..row_len {
+                let x = row[i + 1];
+                let a = if i >= bpp { out[start + i - bpp] } else { 0 };
+                let b = if r > 0 { out[start - row_len + i] } else { 0 };
+                let c = if r > 0 && i >= bpp { out[start - row_len + i - bpp] } else { 0 };
+                let v = match row[0] {
+                    1 => x.wrapping_add(a),
+                    2 => x.wrapping_add(b),
+                    3 => x.wrapping_add(((a as u16 + b as u16) / 2) as u8),
+                    4 => {
+                        let p = a as i16 + b as i16 - c as i16;
+                        let (pa, pb, pc) = ((p - a as i16).abs(), (p - b as i16).abs(), (p - c as i16).abs());
+                        x.wrapping_add(if pa <= pb && pa <= pc { a } else if pb <= pc { b } else { c })
+                    }
+                    _ => x,
+                };
+                out.push(v);
+            }
+        }
+        out
+    }
+
+    /// PdfCraft patch: deterministic noise, so the cases below cover every byte value.
+    fn noise(len: usize, seed: u32) -> Vec<u8> {
+        let mut state = seed.wrapping_mul(2654435761).wrapping_add(1);
+        (0..len)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 17;
+                state ^= state << 5;
+                (state >> 24) as u8
+            })
+            .collect()
+    }
+
+    #[test]
+    fn png_predictors_match_the_specification_at_every_depth_and_width() {
+        let mut seed = 1;
+        for bits_per_component in [1u8, 2, 4, 8, 16] {
+            for colors in 1u8..=5 {
+                for columns in 1usize..=9 {
+                    let params = PredictorParams {
+                        predictor: 15,
+                        colors,
+                        bits_per_component,
+                        columns,
+                        early_change: false,
+                    };
+                    let row_len = params.row_length_in_bytes();
+                    let bpp = (usize::from(colors) * usize::from(bits_per_component)).div_ceil(8);
+                    // Every filter type (and an unknown one) on some row, plus a cut-off last row.
+                    let rows = 7;
+                    let mut data = noise(rows * (row_len + 1) + row_len / 2, seed);
+                    for r in 0..rows {
+                        data[r * (row_len + 1)] = (r % 6) as u8;
+                    }
+                    seed += 1;
+                    let out = apply_predictor(data.clone(), &params).unwrap();
+                    assert_eq!(
+                        out,
+                        png_reference(&data, row_len, bpp),
+                        "bpc {bits_per_component}, colors {colors}, columns {columns}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// PdfCraft patch: a row of 4-bit RGB of odd width ends halfway through a pixel. Its last byte
+    /// was dropped and every later row started a byte early.
+    #[test]
+    fn png_rows_ending_inside_a_pixel_keep_their_last_byte() {
+        let params = PredictorParams {
+            predictor: 15,
+            colors: 3,
+            bits_per_component: 4,
+            columns: 3,
+            early_change: false,
+        };
+        // 36 bits a row: five bytes, the last one half a pixel. Sub adds the byte two to the left.
+        let data = [
+            1, 0x10, 0x20, 0x01, 0x02, 0x03, //
+            1, 0x40, 0x50, 0x04, 0x05, 0x06, //
+        ];
+        let out = apply_predictor(data.to_vec(), &params).unwrap();
+        assert_eq!(out, [0x10, 0x20, 0x11, 0x22, 0x14, 0x40, 0x50, 0x44, 0x55, 0x4a]);
+    }
+
+    #[test]
+    fn tiff_predictor_of_eight_bit_samples_adds_the_pixel_to_the_left() {
+        for colors in 1u8..=4 {
+            let params = PredictorParams {
+                predictor: 2,
+                colors,
+                bits_per_component: 8,
+                columns: 5,
+                early_change: false,
+            };
+            let row_len = 5 * usize::from(colors);
+            let data = noise(3 * row_len + 2, u32::from(colors));
+            // TIFF rows carry no filter byte: give each a Sub one for the oracle.
+            let tagged: Vec<u8> = data
+                .chunks_exact(row_len)
+                .flat_map(|row| core::iter::once(1).chain(row.iter().copied()))
+                .collect();
+            let out = apply_predictor(data.clone(), &params).unwrap();
+            assert_eq!(out, png_reference(&tagged, row_len, usize::from(colors)), "colors {colors}");
+        }
+    }
+
+    #[test]
+    fn png_predictor_without_a_whole_row_is_empty() {
+        let params = PredictorParams {
+            predictor: 15,
+            colors: 1,
+            bits_per_component: 8,
+            columns: 4,
+            early_change: false,
+        };
+        assert_eq!(apply_predictor(vec![2, 1, 2, 3], &params).unwrap(), Vec::<u8>::new());
+        assert_eq!(apply_predictor(Vec::new(), &params).unwrap(), Vec::<u8>::new());
     }
 }
