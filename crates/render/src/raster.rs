@@ -3364,6 +3364,11 @@ trailer << /Root 1 0 R >>
     /// no decomposition, reversible wavelet, and one empty packet per component. Empty
     /// coefficients decode to the midpoint (128) after the unsigned DC level shift.
     fn jpx_midpoint_pdf(bpc: u8, components: u16) -> Vec<u8> {
+        jpx_midpoint_page(bpc, components, "q 20 0 0 20 5 5 cm /Im1 Do Q 1 0 0 rg 0 0 4 4 re f")
+    }
+
+    /// [`jpx_midpoint_pdf`]'s image as `/Im1` of a 40 × 40 page drawn by `content`.
+    fn jpx_midpoint_page(bpc: u8, components: u16, content: &str) -> Vec<u8> {
         let mut codestream = vec![0xff, 0x4f, 0xff, 0x51]; // SOC, SIZ.
         codestream.extend_from_slice(&(38 + 3 * components).to_be_bytes());
         codestream.extend_from_slice(&0_u16.to_be_bytes()); // Rsiz.
@@ -3384,7 +3389,6 @@ trailer << /Root 1 0 R >>
         codestream.extend(std::iter::repeat_n(0, usize::from(components)));
         codestream.extend_from_slice(&[0xff, 0xd9]); // EOC.
 
-        let content = "q 20 0 0 20 5 5 cm /Im1 Do Q 1 0 0 rg 0 0 4 4 re f";
         let mut pdf = format!(
             "%PDF-1.7\n\
 1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n\
@@ -5832,6 +5836,18 @@ endstream endobj
         let page = r.render(RenderRequest { page: 0, scale: 1.0, ..Default::default() });
         assert!(page.error.is_none(), "{:?}", page.error);
         assert_eq!(r.images.decodes(), 2, "another zoom asks for another size");
+    }
+
+    /// The decode target was the distance of an image's corners from the canvas origin, which is
+    /// zero for a mirrored image in the page's top-left corner, and the JPEG 2000 decoder divides
+    /// by it. The target is now at least one pixel.
+    #[test]
+    fn a_jpeg_2000_image_with_a_corner_on_the_canvas_origin_draws() {
+        let pdf = jpx_midpoint_page(8, 3, "q -20 0 0 20 20 20 cm /Im1 Do Q");
+        let mut r = PageRenderer::new(Arc::new(pdf), RenderConfig::default());
+        let page = r.render(RenderRequest { page: 0, scale: 1.0, ..Default::default() });
+        assert!(page.error.is_none(), "{:?}", page.error);
+        assert_eq!(&page.rgba[((10 * 40 + 10) * 4)..][..4], &[128, 128, 128, 255], "the image paints gray");
     }
 
     /// A pool's workers share one decoded-image cache, and while one decodes an image the
