@@ -54,7 +54,8 @@ impl Cache {
 /// and every scale decodes them all again. Entries are shared (`Arc`), so a hit lends the pixels
 /// without copying them; when an insert would pass the budget the whole map is dropped (a fresh
 /// epoch), which only costs re-decoding, and an image larger than the whole budget is never kept.
-/// The budget caps memory per interpreter cache. A poisoned lock decodes without the cache.
+/// The budget caps memory per cache, which several interpreter caches may share
+/// ([`SharedImageCache`]). A poisoned lock decodes without the cache.
 #[derive(Clone)]
 pub(crate) struct DecodedImageCache {
     inner: Arc<Mutex<DecodedImageCacheInner>>,
@@ -91,16 +92,32 @@ pub(crate) struct DecodedImageKey {
     pub(crate) preview: bool,
 }
 
-#[derive(Default)]
 struct DecodedImageCacheInner {
     map: HashMap<DecodedImageKey, Option<Arc<dyn Any + Send + Sync>>>,
     bytes: usize,
+    budget: usize,
+    /// How many decodes ran through the cache (misses), for tests.
+    decodes: usize,
 }
 
+/// PdfCraft patch: the decoded-image budget of an interpreter cache of its own.
+const DEFAULT_DECODED_IMAGE_BYTES: usize = 64 << 20;
+
 impl DecodedImageCache {
+    /// A cache keeping at most [`DEFAULT_DECODED_IMAGE_BYTES`] of decoded pixels.
     pub(crate) fn new() -> Self {
+        Self::with_budget(DEFAULT_DECODED_IMAGE_BYTES)
+    }
+
+    /// A cache keeping at most `budget` bytes of decoded pixels.
+    pub(crate) fn with_budget(budget: usize) -> Self {
         Self {
-            inner: Arc::new(Mutex::new(DecodedImageCacheInner::default())),
+            inner: Arc::new(Mutex::new(DecodedImageCacheInner {
+                map: HashMap::new(),
+                bytes: 0,
+                budget,
+                decodes: 0,
+            })),
             preview: false,
         }
     }
@@ -113,12 +130,11 @@ impl DecodedImageCache {
         }
     }
 
-    /// The decoded image for `key`, from the cache or from `f`. `None` as the key decodes
-    /// without the cache.
+    /// The decoded image for `key`, from the cache or from `f`, whose result holds `size_of`
+    /// bytes. `None` as the key decodes without the cache.
     pub(crate) fn get_or_insert_with<T: Send + Sync + 'static>(
         &self,
         key: Option<DecodedImageKey>,
-        budget: usize,
         size_of: impl FnOnce(&T) -> usize,
         f: impl FnOnce() -> Option<T>,
     ) -> Option<Arc<T>> {
@@ -127,11 +143,17 @@ impl DecodedImageCache {
         };
         // Fast path: a hit shares the pixels without decoding.
         let hit = match self.inner.lock() {
-            Ok(locked) => locked
-                .map
-                .get(&key)
-                .and_then(|val| val.clone())
-                .and_then(|val| val.downcast::<T>().ok()),
+            Ok(mut locked) => {
+                let hit = locked
+                    .map
+                    .get(&key)
+                    .and_then(|val| val.clone())
+                    .and_then(|val| val.downcast::<T>().ok());
+                if hit.is_none() {
+                    locked.decodes = locked.decodes.saturating_add(1);
+                }
+                hit
+            }
             // A thread panicked while holding the lock: decode without the cache.
             Err(_) => return f().map(Arc::new),
         };
@@ -150,10 +172,10 @@ impl DecodedImageCache {
             return Some(existing);
         }
         let size = val.as_deref().map_or(0, size_of);
-        if size > budget {
+        if size > locked.budget {
             return val;
         }
-        if locked.bytes.saturating_add(size) > budget {
+        if locked.bytes.saturating_add(size) > locked.budget {
             locked.map.clear();
             locked.bytes = 0;
         }
@@ -163,6 +185,27 @@ impl DecodedImageCache {
             val.clone().map(|val| val as Arc<dyn Any + Send + Sync>),
         );
         val
+    }
+}
+
+/// PdfCraft patch: decoded image pixels shared by several interpreter caches over the same
+/// document data (the threads of a render pool), within one byte budget, so a large scan is
+/// decoded and held once rather than once per thread. Its keys hold where each image's
+/// dictionary lies in the document's data, so every cache sharing it must interpret the same
+/// bytes, and it must not outlive them.
+#[derive(Clone)]
+pub struct SharedImageCache(pub(crate) DecodedImageCache);
+
+impl SharedImageCache {
+    /// A cache keeping at most `budget` bytes of decoded pixels.
+    pub fn new(budget: usize) -> Self {
+        Self(DecodedImageCache::with_budget(budget))
+    }
+
+    /// How many images were decoded through the cache (its misses), for PdfCraft's tests.
+    #[doc(hidden)]
+    pub fn decodes(&self) -> usize {
+        self.0.inner.lock().map_or(0, |inner| inner.decodes)
     }
 }
 

@@ -23,7 +23,7 @@ use work_queue::{ResultReceiver, WorkQueue};
 
 use hayro::hayro_interpret::font::{FontData, FontQuery};
 use hayro::hayro_interpret::hayro_cmap::CidFamily;
-use hayro::hayro_interpret::{InterpreterSettings, InterpreterWarning};
+use hayro::hayro_interpret::{InterpreterSettings, InterpreterWarning, SharedImageCache};
 use hayro::hayro_syntax::Pdf;
 use hayro::vello_cpu::color::AlphaColor;
 use hayro::vello_cpu::color::palette::css::WHITE;
@@ -123,6 +123,24 @@ fn japanese_face(name: &str, serif: bool, bold: bool) -> JapaneseFace {
         JapaneseFace::Gothic { bold }
     } else {
         JapaneseFace::Mincho
+    }
+}
+
+/// Bytes of decoded image pixels a renderer keeps for all its renders (and a pool for all its
+/// workers) to share: room for a full-page scan of a large drawing sheet (a 12353 × 8999
+/// greyscale scan holds 111 MB; an ARCH D sheet scanned in colour at 300 dpi, 233 MB), so its
+/// tiles and zooms decode it once between them. Each pool worker used to keep 64 MiB of its own,
+/// up to 448 MiB over seven, and none of them could keep such a scan.
+const SHARED_IMAGE_BYTES: usize = 256 << 20;
+
+/// Decoded images shared by a pool's workers (see [`SHARED_IMAGE_BYTES`]).
+#[cfg(not(target_arch = "wasm32"))]
+struct PoolImages(SharedImageCache);
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Default for PoolImages {
+    fn default() -> Self {
+        Self(SharedImageCache::new(SHARED_IMAGE_BYTES))
     }
 }
 
@@ -415,13 +433,16 @@ pub struct PageRenderer {
     pdf: Option<Pdf>,
     settings: InterpreterSettings,
     stats: RenderStats,
+    /// Decoded images shared by its renders (over `bytes`, which every parse reads).
+    images: SharedImageCache,
 }
 
 impl PageRenderer {
     pub fn new(bytes: Arc<Vec<u8>>, config: RenderConfig) -> Self {
         let pdf = parse(&bytes, config.password.as_deref());
         let settings = config.settings();
-        Self { bytes, config, pdf, settings, stats: RenderStats { parser_builds: 1, ..RenderStats::default() } }
+        let images = SharedImageCache::new(SHARED_IMAGE_BYTES);
+        Self { bytes, config, pdf, settings, stats: RenderStats { parser_builds: 1, ..RenderStats::default() }, images }
     }
 
     pub fn page_count(&self) -> usize {
@@ -452,7 +473,7 @@ impl PageRenderer {
         let Some(pdf) = self.pdf.as_ref() else {
             return finish(req, start, Err(("the document could not be parsed".into(), false)), Vec::new());
         };
-        let cache = RenderCache::new();
+        let cache = RenderCache::with_shared_images(&self.images);
         let warnings = Arc::new(Mutex::new(Vec::new()));
         let settings = warning_settings(&self.settings, warnings.clone());
         let r = render_page(pdf, &cache, &settings, self.config.reject_oversize, request_reading(&self.config, &req), req);
@@ -535,6 +556,10 @@ struct Shared {
     /// request cannot trap every worker in turn while other scales, tiles, or generations remain usable.
     stuck: Mutex<std::collections::HashSet<RequestFailureKey>>,
     stats: AtomicRenderStats,
+    /// Decoded images every worker's render cache shares: every parser reads the pool's bytes,
+    /// so their images agree, and the cache lives no longer than the workers that hold them.
+    #[cfg(not(target_arch = "wasm32"))]
+    images: PoolImages,
     /// Per worker id: set to stop that worker's render at its next content operator once nobody
     /// can receive its answer (the pool was dropped, or the watchdog gave up on the render).
     /// Lock `busy` first when holding both.
@@ -1091,7 +1116,7 @@ fn worker(
                         }) {
                             Some(pdf) => {
                                 let shared_generation = pdf.is_some();
-                                (pdf, RenderCache::new(), shared_generation)
+                                (pdf, RenderCache::with_shared_images(&shared.images.0), shared_generation)
                             }
                             None => {
                                 let pdf = if !request_cancelled.load(Ordering::Acquire)
@@ -1102,7 +1127,7 @@ fn worker(
                                 } else {
                                     None
                                 };
-                                (pdf, RenderCache::new(), false)
+                                (pdf, RenderCache::with_shared_images(&shared.images.0), false)
                             }
                         }
                     };
@@ -5716,6 +5741,62 @@ endstream endobj
         let w = out.width as usize;
         assert_eq!(rgb_at(&out.rgba, w, 35, 35), [0, 255, 255], "the transfer function was not applied to a cached image");
         assert_eq!(rgb_at(&out.rgba, w, 100, 35), [255, 0, 0]);
+    }
+
+    /// A 300 × 200 pt page under one `width` × `height` greyscale image, as a scanned drawing
+    /// sheet: a ramp crossed by dark grid lines, Flate-compressed in PNG Up rows.
+    fn scanned_sheet_pdf(width: usize, height: usize) -> Vec<u8> {
+        use std::io::Write;
+
+        let mut rows = Vec::with_capacity((width + 1) * height);
+        let mut above = vec![0u8; width];
+        for y in 0..height {
+            let row: Vec<u8> = (0..width).map(|x| if x % 50 == 0 || y % 40 == 0 { 0 } else { (x * 255 / width) as u8 }).collect();
+            rows.push(2);
+            rows.extend(row.iter().zip(&above).map(|(v, a)| v.wrapping_sub(*a)));
+            above = row;
+        }
+        let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(&rows).unwrap();
+        let compressed = encoder.finish().unwrap();
+        let content = "q 300 0 0 200 0 0 cm /Scan Do Q";
+        let mut pdf = format!(
+            "%PDF-1.7\n\
+1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n\
+2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj\n\
+3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 300 200] /Contents 4 0 R /Resources << /XObject << /Scan 5 0 R >> >> >> endobj\n\
+4 0 obj << /Length {} >> stream\n{content}\nendstream endobj\n\
+5 0 obj << /Type /XObject /Subtype /Image /Width {width} /Height {height} /ColorSpace /DeviceGray /BitsPerComponent 8 /Filter /FlateDecode /DecodeParms << /Predictor 15 /Columns {width} >> /Length {} >> stream\n",
+            content.len(),
+            compressed.len()
+        )
+        .into_bytes();
+        pdf.extend_from_slice(&compressed);
+        pdf.extend_from_slice(b"\nendstream endobj\ntrailer << /Root 1 0 R >>\n%%EOF\n");
+        pdf
+    }
+
+    /// A renderer keeps the images it decodes for its later renders, and a pool's workers decode
+    /// through one cache (vendored hayro-interpret patch: `SharedImageCache`). Each render, and
+    /// each worker, had a cache of its own, so every render decoded its page's images again.
+    #[test]
+    fn a_renderers_renders_share_their_decoded_images() {
+        let mut r = PageRenderer::new(Arc::new(scanned_sheet_pdf(600, 400)), RenderConfig::default());
+        for _ in 0..3 {
+            let page = r.render(RenderRequest { page: 0, scale: 1.0, ..Default::default() });
+            assert!(page.error.is_none(), "{:?}", page.error);
+        }
+        assert_eq!(r.images.decodes(), 1, "three renders of the page decode its scan once");
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_pools_workers_decode_through_the_pools_image_cache() {
+        let pool = RenderPool::new(Arc::new(scanned_sheet_pdf(600, 400)), 2, RenderConfig::default());
+        pool.set_queue(vec![RenderRequest { page: 0, scale: 1.0, ..Default::default() }]);
+        let page = receive_before_deadline(&pool);
+        assert!(page.error.is_none(), "{:?}", page.error);
+        assert_eq!(pool.shared.images.0.decodes(), 1, "the worker decoded the scan through the pool's cache");
     }
 
     /// A Japanese CID font that isn't embedded (Adobe-Japan1, as `HeiseiMin-W3` with

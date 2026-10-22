@@ -1,4 +1,4 @@
-use crate::cache::{Cache, CacheKey, DecodedImageCache};
+use crate::cache::{Cache, CacheKey, DecodedImageCache, SharedImageCache};
 use crate::color::ColorSpace;
 use crate::convert::convert_transform;
 use crate::font::{Font, StandardFont};
@@ -138,6 +138,15 @@ impl<'a> InterpreterCache<'a> {
             font_cache: Rc::new(RefCell::new(HashMap::new())),
             object_cache: Cache::new(),
             decoded_cache: DecodedImageCache::new(),
+        }
+    }
+
+    /// PdfCraft patch: a new interpreter cache whose decoded images live in `images`, which
+    /// other caches over the same document data share (see [`SharedImageCache`]).
+    pub fn with_shared_images(images: &SharedImageCache) -> Self {
+        Self {
+            decoded_cache: images.0.clone(),
+            ..Self::new()
         }
     }
 }
