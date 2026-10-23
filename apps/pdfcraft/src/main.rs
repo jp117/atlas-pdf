@@ -34,6 +34,8 @@ mod apple_events;
 // Atlas fork: Setup's hooks and in-place updates.
 #[cfg(target_os = "windows")]
 mod atlas_install;
+#[cfg(target_os = "windows")]
+mod atlas_register;
 mod compositor_gpu;
 mod decorations;
 mod logging;

@@ -32,12 +32,20 @@ const MAX_PACKAGE: u64 = 2 << 30;
 /// The installed copy, once [`startup`] has found one.
 static INSTALLED: OnceLock<Arc<Installed>> = OnceLock::new();
 
+/// The first start after Setup installed the app.
+static FIRST_RUN: AtomicBool = AtomicBool::new(false);
+
 /// Answer Setup's hooks (they exit), then look for the installation this copy belongs to.
 pub fn startup() {
     VelopackApp::build()
         // A downloaded update installs when the app closes, never as it starts: a second launch
         // that only hands its files to the running window must not replace that window's files.
         .set_auto_apply_on_startup(false)
+        .on_after_install_fast_callback(|_| registered(crate::atlas_register::register()))
+        // An update may move or rename things: write every value again.
+        .on_after_update_fast_callback(|_| registered(crate::atlas_register::register()))
+        .on_before_uninstall_fast_callback(|_| crate::atlas_register::unregister())
+        .on_first_run(|_| FIRST_RUN.store(true, Ordering::SeqCst))
         .run();
     let source = Feed { base: std::env::var(FEED_VARIABLE).unwrap_or_else(|_| FEED.to_string()) };
     // Full packages only: deltas would have to come from older releases than `latest`.
@@ -52,10 +60,25 @@ pub fn startup() {
     }
 }
 
-/// Let an installed copy's window update it.
+fn registered(result: Result<(), String>) {
+    if let Err(e) = result {
+        log::error!("couldn't offer Atlas PDF for PDFs: {e}");
+    }
+}
+
+/// Let an installed copy's window update it. On the first start, open Settings ▸ Default apps at
+/// Atlas PDF, since Windows leaves choosing the app for PDFs to the user.
 pub fn attach(app: &mut PdfCraftApp) {
     if let Some(installed) = INSTALLED.get() {
         app.set_updater(Arc::clone(installed) as Arc<dyn Updater>);
+    }
+    if FIRST_RUN.load(Ordering::SeqCst) {
+        match std::process::Command::new("explorer.exe").arg("ms-settings:defaultapps?registeredAppUser=Atlas%20PDF").spawn() {
+            Ok(_) => {
+                app.notify("Atlas PDF is installed. To open PDFs in it by double-click, set .pdf to Atlas PDF in the Settings page that opened.")
+            }
+            Err(e) => log::warn!("couldn't open Default apps: {e}"),
+        }
     }
 }
 
