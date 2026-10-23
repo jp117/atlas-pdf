@@ -53,6 +53,14 @@ windows = { version = "0.62", default-features = false, features = ["std", "UI_V
 # socket. `std` has no Unix sockets on Windows, and calling Winsock directly needs unsafe, which
 # our workspace forbids. Already in the lockfile through zbus; pinned exactly, review before bumping.
 uds_windows = "=1.2.1"
+# Atlas fork: Setup's hooks and in-place updates for installed copies (src/atlas_install.rs).
+# Update requests go through our own client (the OS's trusted roots), not velopack's;
+# `public-utils` exposes the manifest type its `UpdateSource` trait takes. Pinned exactly, with
+# vpk at the same version in packaging/windows/package-atlas.ps1: review the diff before bumping.
+velopack = { version = "=1.2.161", features = ["public-utils"] }
+# Atlas fork: Setup's hooks offer Atlas PDF for PDFs under HKEY_CURRENT_USER
+# (src/atlas_register.rs). A safe registry API, already in the lockfile (hyper-util, a build dependency).
+windows-registry = "0.6"
 
 [build-dependencies]
 # Icon + VERSIONINFO for pdfcraft.exe; build.rs only uses it when targeting Windows.

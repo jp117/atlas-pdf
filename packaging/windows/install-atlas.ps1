@@ -3,13 +3,16 @@
 #   powershell -ExecutionPolicy Bypass -File packaging\windows\install-atlas.ps1            # install or update
 #   powershell -ExecutionPolicy Bypass -File packaging\windows\install-atlas.ps1 -Uninstall
 #
+# For trying a local build: everyone else installs AtlasPDF-win-Setup.exe from the GitHub
+# release, which updates itself (docs/releasing-atlas.md). Don't keep both: they register the same
+# names, and whichever ran last owns them.
+#
 # Copies a release build to %LOCALAPPDATA%\Programs\Atlas PDF (the app as AtlasPDF.exe, so it
-# never collides with an installed PdfCraft's pdfcraft.exe), adds a Start menu shortcut and an
-# "Open with Atlas PDF" entry on PDFs, and registers Atlas PDF with Windows' Default Programs
-# (a ProgID, OpenWithProgids, Capabilities and RegisteredApplications, as PdfCraft's installer
-# does). Windows does not let a program make itself the default: this only offers Atlas PDF,
-# and a first install opens Settings so you can choose it. Your settings (%APPDATA%\AtlasPDF) are
-# left alone by -Uninstall.
+# never collides with an installed PdfCraft's pdfcraft.exe) and adds a Start menu shortcut. The
+# app registers itself, through the hooks Setup runs (apps/pdfcraft/src/atlas_register.rs): an
+# "Open with Atlas PDF" entry on PDFs and Windows' Default Programs. Windows does not let a program
+# make itself the default: this only offers Atlas PDF, and a first install opens Settings so you
+# can choose it. Your settings (%APPDATA%\AtlasPDF) are left alone by -Uninstall.
 
 param(
     [string]$BinDir = (Join-Path $PSScriptRoot '..\..\target\release'),
@@ -20,36 +23,14 @@ $ErrorActionPreference = 'Stop'
 $Name = 'Atlas PDF'
 $Dest = Join-Path $env:LOCALAPPDATA 'Programs\Atlas PDF'
 $Exe = Join-Path $Dest 'AtlasPDF.exe'
-$ProgId = 'AtlasPDF.Document'
-$Classes = 'HKCU:\Software\Classes'
 $Capabilities = 'HKCU:\Software\AtlasPDF\Capabilities'
 $Shortcut = Join-Path ([Environment]::GetFolderPath('Programs')) 'Atlas PDF.lnk'
 $Repo = Resolve-Path (Join-Path $PSScriptRoot '..\..')
 
-# Every key this script creates, removed whole by -Uninstall.
-$OwnKeys = @(
-    "$Classes\$ProgId",
-    "$Classes\Applications\AtlasPDF.exe",
-    "$Classes\SystemFileAssociations\.pdf\shell\AtlasPDF.Open",
-    'HKCU:\Software\AtlasPDF',
-    'HKCU:\Software\Microsoft\Windows\CurrentVersion\App Paths\AtlasPDF.exe'
-)
-
-# Create a key only when it is missing: New-Item -Force on an existing registry key deletes and
-# recreates it, which would wipe other apps' values in shared keys (.pdf\OpenWithProgids,
-# RegisteredApplications).
-function Confirm-Key([string]$Key) {
-    if (-not (Test-Path $Key)) { New-Item -Path $Key -Force | Out-Null }
-}
-
-function Set-Default([string]$Key, [string]$Value) {
-    Confirm-Key $Key
-    Set-Item -Path $Key -Value $Value
-}
-
-function Set-Value([string]$Key, [string]$ValueName, [string]$Value) {
-    Confirm-Key $Key
-    New-ItemProperty -Path $Key -Name $ValueName -Value $Value -PropertyType String -Force | Out-Null
+# Run one of the app's Setup hooks (--veloapp-install or --veloapp-uninstall; Velopack's names),
+# which register or unregister it and exit. The version argument is required but unused.
+function Invoke-Hook([string]$Hook) {
+    Start-Process -FilePath $Exe -ArgumentList $Hook, '0.0.0' -Wait -NoNewWindow
 }
 
 # Tell Explorer that file associations changed, so menus and icons update without a sign-out.
@@ -70,12 +51,7 @@ function Test-Running {
 
 if ($Uninstall) {
     Test-Running
-    foreach ($key in $OwnKeys) {
-        if (Test-Path $key) { Remove-Item -Path $key -Recurse -Force }
-    }
-    $openWith = "$Classes\.pdf\OpenWithProgids"
-    if (Test-Path $openWith) { Remove-ItemProperty -Path $openWith -Name $ProgId -ErrorAction SilentlyContinue }
-    Remove-ItemProperty -Path 'HKCU:\Software\RegisteredApplications' -Name $Name -ErrorAction SilentlyContinue
+    if (Test-Path $Exe) { Invoke-Hook '--veloapp-uninstall' }
     if (Test-Path $Shortcut) { Remove-Item $Shortcut -Force }
     if (Test-Path $Dest) { Remove-Item $Dest -Recurse -Force }
     Send-AssociationChanged
@@ -105,30 +81,10 @@ if (Test-Path (Join-Path $models '*.rten')) {
     Write-Warning 'No OCR models in assets\models (run: cargo xtask models). Everything but Scan & OCR works.'
 }
 
-# Default Programs registration. The document icon is resource 2 of the executable (build.rs).
+# Default Programs registration, by the app itself.
 $firstInstall = -not (Test-Path $Capabilities)
-$open = "`"$Exe`" `"%1`""
-Set-Default "$Classes\$ProgId" 'PDF Document'
-Set-Default "$Classes\$ProgId\DefaultIcon" "`"$Exe`",-2"
-Set-Default "$Classes\$ProgId\shell\open\command" $open
-Set-Value "$Classes\.pdf\OpenWithProgids" $ProgId ''
-Set-Value "$Classes\Applications\AtlasPDF.exe" 'FriendlyAppName' $Name
-Set-Default "$Classes\Applications\AtlasPDF.exe\DefaultIcon" "`"$Exe`",-2"
-Set-Value "$Classes\Applications\AtlasPDF.exe\SupportedTypes" '.pdf' ''
-Set-Default "$Classes\Applications\AtlasPDF.exe\shell\open\command" $open
-Set-Value $Capabilities 'ApplicationName' $Name
-Set-Value $Capabilities 'ApplicationDescription' "Atlas Switch's PDF workbench for construction drawings"
-Set-Value $Capabilities 'ApplicationIcon' "`"$Exe`",0"
-Set-Value "$Capabilities\FileAssociations" '.pdf' $ProgId
-Set-Value 'HKCU:\Software\RegisteredApplications' $Name 'Software\AtlasPDF\Capabilities'
-Set-Default 'HKCU:\Software\Microsoft\Windows\CurrentVersion\App Paths\AtlasPDF.exe' $Exe
-
-# "Open with Atlas PDF" on every PDF, whichever app is the default (Show more options on Windows 11).
-$menu = "$Classes\SystemFileAssociations\.pdf\shell\AtlasPDF.Open"
-Set-Default $menu 'Open with Atlas PDF'
-Set-Value $menu 'Icon' "`"$Exe`",0"
-Set-Value $menu 'MultiSelectModel' 'Document'
-Set-Default "$menu\command" $open
+Invoke-Hook '--veloapp-install'
+if (-not (Test-Path $Capabilities)) { throw "$Exe didn't register itself: build it from a commit that has apps/pdfcraft/src/atlas_register.rs." }
 
 # Start menu shortcut.
 $shell = New-Object -ComObject WScript.Shell

@@ -10,6 +10,11 @@ redaction, signatures, printing, the command-line tool and the opt-in MCP server
 features below. For the upstream feature list, see
 [PdfCraft's README](https://github.com/storytold/pdfcraft#readme).
 
+**To install it,** download `AtlasPDF-win-Setup.exe` from the
+[latest release](https://github.com/jp117/atlas-pdf/releases/latest) and run it. No administrator
+rights are needed, and it keeps itself up to date. See
+[Installing and releasing Atlas PDF](docs/releasing-atlas.md).
+
 ## What Atlas adds
 
 ### Takeoff marks
@@ -92,7 +97,9 @@ cargo test -p pdfcraft-atlas                # Atlas's own rules
 Scope builds and tests to the crates you touched (see `CLAUDE.md`). A full workspace build takes
 about 11 minutes on a 12-core machine.
 
-### Installing on a PC
+### Installing a local build
+
+Everyone else installs Setup from the latest release (above). To try a build of your own:
 
 ```sh
 cargo build --release -p pdfcraft -p pdfcraft-cli
@@ -105,7 +112,10 @@ administrator rights. It adds a Start menu shortcut and an "Open with Atlas PDF"
 and registers the app so it can be the PDF default. Windows leaves that choice to you: the
 script opens **Settings ▸ Default apps ▸ Atlas PDF**, where you set `.pdf` to Atlas PDF. Run it
 again after a new build to update (close Atlas PDF first). Add `-Uninstall` to remove it; your
-settings in `%APPDATA%\AtlasPDF` are kept.
+settings in `%APPDATA%\AtlasPDF` are kept. A script install doesn't update itself, and it shares
+its registry entries with a Setup install: keep one or the other.
+
+To publish a release, see [Cutting a release](docs/releasing-atlas.md#cutting-a-release).
 
 ## Working on the fork
 
@@ -160,7 +170,8 @@ crates it touched and `cargo test -p pdfcraft-ui-egui` before pushing.
 - Revision compare for REV-0 / REV-1 shop drawings.
 - Markup and respond: clouds, callouts and stamps on layers.
 - Remember layer choices per file.
-- An Atlas icon and installer.
+- An Atlas icon (the installer and app still use PdfCraft's).
+- Code-sign the installer, so Windows stops warning on the first install.
 - Hand takeoff marks to the switchgear quoting agents (`takeoff_export` JSON).
 
 ## Licence and credits

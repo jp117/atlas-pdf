@@ -4,12 +4,18 @@
 //! network code; without a source (the web build, tests) the command opens the releases page.
 //! PdfCraft never downloads or installs anything itself: the user downloads the new version.
 //! It asks only when the user does: there is no check at start (the owner's decision).
+//! Atlas fork: copies installed by Atlas PDF's Setup also check at start, and update themselves
+//! (`atlas::updates`).
 
 use std::sync::Arc;
 
 use egui::{Align, Layout};
 
 use crate::{PdfCraftApp, theme, widgets};
+
+// Atlas fork: installed copies update themselves (`atlas::updates`).
+#[cfg(not(target_arch = "wasm32"))]
+pub use crate::atlas::updates::Updater;
 
 /// Where every release is listed. Atlas fork: Atlas PDF's releases, never PdfCraft's.
 pub const RELEASES_PAGE: &str = "https://github.com/jp117/atlas-pdf/releases";
@@ -65,6 +71,11 @@ pub(crate) struct Updates {
 impl PdfCraftApp {
     /// Help ▸ Check for updates: ask for the latest release and show the outcome.
     pub fn check_for_updates(&mut self) {
+        // Atlas fork: installed copies update themselves.
+        #[cfg(not(target_arch = "wasm32"))]
+        if crate::atlas::updates::check(self) {
+            return;
+        }
         let Some(source) = self.update_source.clone() else {
             self.open_url(RELEASES_PAGE);
             return;
@@ -95,6 +106,9 @@ impl PdfCraftApp {
 
     /// Pick up a finished check (each frame).
     pub(crate) fn poll_updates(&mut self) {
+        // Atlas fork: the check at start and the background download.
+        #[cfg(not(target_arch = "wasm32"))]
+        crate::atlas::updates::poll(self);
         #[cfg(not(target_arch = "wasm32"))]
         if let Check::Running(rx) = &self.updates.check {
             let result = match rx.try_recv() {
@@ -109,6 +123,9 @@ impl PdfCraftApp {
 
 /// The Updates dialog.
 pub(crate) fn dialog(app: &mut PdfCraftApp, ctx: &egui::Context) {
+    // Atlas fork: the dialog for copies that update themselves.
+    #[cfg(not(target_arch = "wasm32"))]
+    crate::atlas::updates::dialog(app, ctx);
     if !app.updates.open {
         return;
     }

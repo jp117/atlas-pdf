@@ -63,3 +63,11 @@ allow = ["OFL-1.1", "Ubuntu-font-1.0"]
 [[licenses.exceptions]]
 crate = "webpki-root-certs"
 allow = ["CDLA-Permissive-2.0"]
+
+# Atlas fork: velopack (Setup's hooks and in-place updates, apps/pdfcraft/src/atlas_install.rs)
+# builds ureq with its default features, which link this Mozilla CA bundle (CDLA-Permissive-2.0
+# data) into the Windows app. It is never used: update requests go through our own client with
+# the operating system's roots. Velopack's Update.exe, in the same package, carries it too.
+[[licenses.exceptions]]
+crate = "webpki-roots"
+allow = ["CDLA-Permissive-2.0"]
