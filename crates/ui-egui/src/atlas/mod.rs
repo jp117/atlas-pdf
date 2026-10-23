@@ -8,6 +8,8 @@
 mod layers_panel;
 mod takeoff_panel;
 mod takeoff_tool;
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) mod updates;
 
 use crate::{PdfCraftApp, QuickTool};
 use pdfcraft_atlas::takeoff::{Listing, MarkText, Status};
@@ -26,6 +28,9 @@ pub(crate) struct AtlasState {
     listing: Option<(DocId, u64, Result<Listing, String>)>,
     /// The Takeoff panel's filters and editor.
     panel: takeoff_panel::PanelState,
+    /// Updating an installed copy.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) updates: updates::UpdateState,
 }
 
 impl AtlasState {
