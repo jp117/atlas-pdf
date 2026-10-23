@@ -31,6 +31,9 @@ use pdfcraft_ui_egui::PdfCraftApp;
 
 #[cfg(target_os = "macos")]
 mod apple_events;
+// Atlas fork: Setup's hooks and in-place updates.
+#[cfg(target_os = "windows")]
+mod atlas_install;
 mod compositor_gpu;
 mod decorations;
 mod logging;
@@ -176,6 +179,9 @@ fn main() -> eframe::Result {
             let _ = std::io::Write::write_fmt(&mut std::io::stderr(), format_args!("pdfcraft: {report}\n"));
         }
     }));
+    // Atlas fork: Setup's install, update and uninstall hooks are answered here, and exit.
+    #[cfg(target_os = "windows")]
+    atlas_install::startup();
     let mut files = Vec::new();
     let mut options: Vec<(String, String)> = Vec::new();
     let mut control_file: Option<String> = None;
@@ -242,7 +248,7 @@ fn main() -> eframe::Result {
             &apple_events,
         ),
     );
-    match result {
+    let result = match result {
         // Only a renderer that couldn't start: without a window or display at all, OpenGL can't
         // help either, and winit's own error says more.
         Err(e @ eframe::Error::Wgpu(_)) if retry_with_gl(choice, started.get()) => {
@@ -262,7 +268,11 @@ fn main() -> eframe::Result {
             )
         }
         other => other,
-    }
+    };
+    // Atlas fork: a downloaded update installs once the window has closed.
+    #[cfg(target_os = "windows")]
+    atlas_install::install_on_exit();
+    result
 }
 
 /// Which renderer to start with, from `PDFCRAFT_RENDERER`.
@@ -361,6 +371,9 @@ fn app_creator<'a>(
             app.motion.source = Some(motion::source());
         }
         app.update_source = Some(std::sync::Arc::new(updates::latest_release));
+        // Atlas fork: copies installed by Setup update themselves.
+        #[cfg(target_os = "windows")]
+        atlas_install::attach(&mut app);
         app.printer_source = Some(pdfcraft_ui_egui::system_printers());
         app.os_key_store_ids = cfg!(any(target_os = "macos", target_os = "windows"));
         #[cfg(target_os = "macos")]
