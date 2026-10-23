@@ -10,15 +10,10 @@ const LATEST: &str = "https://api.github.com/repos/jp117/atlas-pdf/releases/late
 /// The latest release. The answer is untrusted: its size is capped, and only a page under
 /// [`RELEASES_PAGE`] is ever offered for download (anything else falls back to that list).
 pub fn latest_release() -> Result<Release, String> {
-    let agent = ureq::Agent::config_builder()
-        .timeout_global(Some(Duration::from_secs(10)))
-        .tls_config(ureq::tls::TlsConfig::builder().root_certs(os_roots()?).build())
-        .build()
-        .new_agent();
-    let mut response = agent
+    let mut response = agent(Duration::from_secs(10))?
         .get(LATEST)
         .header("Accept", "application/vnd.github+json")
-        .header("User-Agent", concat!("AtlasPDF/", env!("CARGO_PKG_VERSION")))
+        .header("User-Agent", USER_AGENT)
         // Read error statuses ourselves: a 403 from GitHub usually means its anonymous
         // rate limit ran out, and the retry time rides along in a response header.
         .config()
@@ -40,6 +35,19 @@ pub fn latest_release() -> Result<Release, String> {
     }
     let body = response.body_mut().with_config().limit(1 << 20).read_to_string().map_err(|e| format!("unreadable answer ({e})"))?;
     parse(&body)
+}
+
+/// How the app names itself to the servers it asks.
+pub const USER_AGENT: &str = concat!("AtlasPDF/", env!("CARGO_PKG_VERSION"));
+
+/// An HTTPS client that trusts the operating system's certificate authorities and gives up on a
+/// request after `timeout`.
+pub fn agent(timeout: Duration) -> Result<ureq::Agent, String> {
+    Ok(ureq::Agent::config_builder()
+        .timeout_global(Some(timeout))
+        .tls_config(ureq::tls::TlsConfig::builder().root_certs(os_roots()?).build())
+        .build()
+        .new_agent())
 }
 
 /// The certificate authorities the operating system trusts.
