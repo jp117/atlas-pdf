@@ -157,7 +157,9 @@ impl UpdateSource for Feed {
         if !plain_file_name(&asset.FileName) {
             return Err(velopack::Error::Other(format!("unexpected package name {:?}", asset.FileName)));
         }
-        let limit = asset.Size.min(MAX_PACKAGE);
+        // ureq refuses a body that reaches its limit, so allow one byte more than the feed's size:
+        // a longer body still fails here, and Velopack checks the size and SHA-256 afterwards.
+        let limit = asset.Size.min(MAX_PACKAGE).saturating_add(1);
         let mut response = get(&self.url(&asset.FileName), Duration::from_secs(60 * 60))?;
         let mut body = response.body_mut().with_config().limit(limit).reader();
         let mut file = std::fs::File::create(local_file)?;
@@ -219,6 +221,43 @@ mod tests {
         let names: Vec<_> = feed.Assets.iter().map(|a| a.FileName.as_str()).collect();
         assert_eq!(names, ["AtlasPDF-0.8.0-full.nupkg"]);
         assert!(parse_feed("<html>").is_err());
+    }
+
+    /// Serve one HTTP response holding `body` on a local port, and return that address.
+    fn serve_once(body: &'static [u8]) -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut request = [0u8; 4096];
+                let _ = std::io::Read::read(&mut stream, &mut request);
+                let head = format!(
+                    "HTTP/1.1 200 OK
+Content-Length: {}
+Connection: close
+
+",
+                    body.len()
+                );
+                let _ = stream.write_all(head.as_bytes());
+                let _ = stream.write_all(body);
+            }
+        });
+        format!("http://127.0.0.1:{port}")
+    }
+
+    fn package(size: u64) -> VelopackAsset {
+        VelopackAsset { FileName: "AtlasSwitch.AtlasPDF-0.7.2-full.nupkg".into(), Size: size, ..Default::default() }
+    }
+
+    #[test]
+    fn a_package_of_exactly_its_feed_size_downloads() {
+        let file = std::env::temp_dir().join(format!("atlas-feed-test-{}.partial", std::process::id()));
+        Feed { base: serve_once(b"hello") }.download_release_entry(&package(5), &file, None).unwrap();
+        assert_eq!(std::fs::read(&file).unwrap(), b"hello");
+        // A server sending more than the feed promised is cut off.
+        assert!(Feed { base: serve_once(b"hello, world") }.download_release_entry(&package(5), &file, None).is_err());
+        let _ = std::fs::remove_file(&file);
     }
 
     /// Velopack installs into `%LOCALAPPDATA%\<packId>`, and uninstalling deletes that folder: it
