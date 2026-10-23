@@ -7,10 +7,10 @@ packages and isn't used here.)
 
 ## Installing (for everyone at Atlas)
 
-1. Download **`AtlasPDF-win-Setup.exe`** from
+1. Download **`AtlasSwitch.AtlasPDF-win-Setup.exe`** from
    <https://github.com/jp117/atlas-pdf/releases/latest>.
 2. Run it. No administrator rights are needed: it installs for you alone in
-   `%LOCALAPPDATA%\AtlasPDF`, adds Start menu and desktop shortcuts, opens Atlas PDF and offers it
+   `%LOCALAPPDATA%\AtlasSwitch.AtlasPDF`, adds Start menu and desktop shortcuts, opens Atlas PDF and offers it
    for PDFs ("Open with Atlas PDF" on any PDF's right-click menu).
    - The installer isn't code-signed yet, so Windows may say *Windows protected your PC*: choose
      **More info ▸ Run anyway**. Updates don't ask again.
@@ -23,7 +23,7 @@ packages and isn't used here.)
 4. **Uninstall** from *Settings ▸ Apps ▸ Installed apps ▸ Atlas PDF*. Your settings
    (`%APPDATA%\AtlasPDF`) stay.
 
-`AtlasPDF-win-Portable.zip` on the same page is the app unzipped, to run from anywhere; it doesn't
+`AtlasSwitch.AtlasPDF-win-Portable.zip` on the same page is the app unzipped, to run from anywhere; it doesn't
 update itself.
 
 ## Cutting a release
@@ -46,8 +46,8 @@ update itself.
    ```
 
    It builds on GitHub's Windows runner, packages with Velopack and publishes **`v<version>`**
-   with `AtlasPDF-win-Setup.exe`, `AtlasPDF-<version>-full.nupkg`, `releases.win.json` and
-   `AtlasPDF-win-Portable.zip`. It refuses a version that is already released.
+   with `AtlasSwitch.AtlasPDF-win-Setup.exe`, `AtlasSwitch.AtlasPDF-<version>-full.nupkg`, `releases.win.json` and
+   `AtlasSwitch.AtlasPDF-win-Portable.zip`. It refuses a version that is already released.
 3. That's all: installed copies find it the next time they start.
 
 **Trying a build without releasing it:** `gh workflow run atlas-release.yml -f publish=false`

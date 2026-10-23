@@ -4,11 +4,11 @@
 
 .DESCRIPTION
   Produces, in -Out (default: dist\atlas):
-    AtlasPDF-win-Setup.exe          the installer: per user, no administrator rights; Start menu
-                                    and desktop shortcuts; registers Atlas PDF for PDFs
-    AtlasPDF-<version>-full.nupkg   the package installed copies update from
-    releases.win.json               the feed installed copies read (apps/pdfcraft/src/atlas_install.rs)
-    AtlasPDF-win-Portable.zip       the same app, unzipped and run anywhere (no automatic updates)
+    AtlasSwitch.AtlasPDF-win-Setup.exe        the installer: per user, no administrator rights; Start menu
+                                              and desktop shortcuts; registers Atlas PDF for PDFs
+    AtlasSwitch.AtlasPDF-<version>-full.nupkg the package installed copies update from
+    releases.win.json                         the feed installed copies read (apps/pdfcraft/src/atlas_install.rs)
+    AtlasSwitch.AtlasPDF-win-Portable.zip     the same app, unzipped and run anywhere (no automatic updates)
 
   The version is [workspace.package] version in Cargo.toml (`cargo xtask version`). The binaries
   link the C runtime statically, so no Visual C++ redistributable is needed. `atlas-release.yml`
@@ -90,8 +90,10 @@ try {
   New-Item -ItemType Directory -Force -Path $Out | Out-Null
   # Full packages only (no deltas): installed copies read `releases/latest/download`, which holds
   # the newest release's files and none of the older ones a delta chain would need.
+  # Setup installs into %LOCALAPPDATA%\<packId>, and uninstalling deletes it: never AtlasPDF, the
+  # app's own folder there (crash recovery, single instance).
   Invoke-Native 'vpk pack' {
-    vpk pack --packId AtlasPDF --packVersion $Version --packDir $Stage --mainExe AtlasPDF.exe `
+    vpk pack --packId AtlasSwitch.AtlasPDF --packVersion $Version --packDir $Stage --mainExe AtlasPDF.exe `
       --packTitle 'Atlas PDF' --packAuthors 'Atlas Switch' --icon (Join-Path $Root 'assets\app-icon\pdfcraft.ico') `
       --delta None --outputDir $Out
   }

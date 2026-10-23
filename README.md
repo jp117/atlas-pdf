@@ -10,7 +10,7 @@ redaction, signatures, printing, the command-line tool and the opt-in MCP server
 features below. For the upstream feature list, see
 [PdfCraft's README](https://github.com/storytold/pdfcraft#readme).
 
-**To install it,** download `AtlasPDF-win-Setup.exe` from the
+**To install it,** download `AtlasSwitch.AtlasPDF-win-Setup.exe` from the
 [latest release](https://github.com/jp117/atlas-pdf/releases/latest) and run it. No administrator
 rights are needed, and it keeps itself up to date. See
 [Installing and releasing Atlas PDF](docs/releasing-atlas.md).

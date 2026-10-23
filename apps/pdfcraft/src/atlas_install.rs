@@ -221,6 +221,15 @@ mod tests {
         assert!(parse_feed("<html>").is_err());
     }
 
+    /// Velopack installs into `%LOCALAPPDATA%\<packId>`, and uninstalling deletes that folder: it
+    /// must not be the app's own folder there (crash recovery, the clipboard cache, single instance).
+    #[test]
+    fn setup_installs_beside_the_data_folder_not_into_it() {
+        let script = include_str!("../../../packaging/windows/package-atlas.ps1");
+        let id = script.split("--packId ").nth(1).and_then(|rest| rest.split_whitespace().next()).unwrap();
+        assert!(!id.is_empty() && !id.eq_ignore_ascii_case(pdfcraft_atlas::brand::DATA_NAME), "{id}");
+    }
+
     #[test]
     fn feed_urls_join_with_one_slash() {
         for base in ["https://example.com/feed", "https://example.com/feed/"] {
