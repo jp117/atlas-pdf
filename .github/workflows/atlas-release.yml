@@ -1,0 +1,88 @@
+# Atlas fork: build Atlas PDF's Windows installer and publish it as a GitHub Release, which
+# installed copies update from (docs/releasing-atlas.md). Run by hand:
+#   gh workflow run atlas-release.yml                   # publish v<Cargo.toml version>
+#   gh workflow run atlas-release.yml -f publish=false  # build only: the files become a workflow artifact
+name: Atlas release
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: "Publish the release (off: build only, and keep the files as a workflow artifact)"
+        type: boolean
+        default: true
+      version:
+        description: "Version override for a test build, e.g. 0.8.0-rc.1 (empty: Cargo.toml)"
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: atlas-release
+  cancel-in-progress: false
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 120
+    permissions:
+      contents: write
+    env:
+      CRAFT_FONTS_DIR: ${{ github.workspace }}\craft-fonts
+      CRAFT_FONTS_REQUIRED: "1"
+      VPK_VERSION: "1.2.161"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # The same craft-fonts commit as upstream's release.yml.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: storytold/craft-fonts
+          ref: 3d9ab3a132ed0eff457e424226a435a901da30d3
+          path: craft-fonts
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Version
+        id: version
+        shell: pwsh
+        env:
+          OVERRIDE: ${{ inputs.version }}
+          PUBLISH: ${{ inputs.publish }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ($env:OVERRIDE) {
+            cargo xtask version set $env:OVERRIDE
+            if ($LASTEXITCODE -ne 0) { exit 1 }
+          }
+          $version = (cargo xtask version | Select-Object -Last 1).Trim()
+          if ($env:PUBLISH -eq 'true') {
+            gh release view "v$version" --repo $env:GITHUB_REPOSITORY 2>$null | Out-Null
+            if ($LASTEXITCODE -eq 0) {
+              Write-Output "::error::v$version is already released. Bump the version first: cargo xtask version set <new>"
+              exit 1
+            }
+          }
+          $global:LASTEXITCODE = 0
+          "version=$version" >> $env:GITHUB_OUTPUT
+      - name: Install vpk
+        run: dotnet tool install -g vpk --version $env:VPK_VERSION
+      - name: Package
+        shell: pwsh
+        run: packaging/windows/package-atlas.ps1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: atlas-pdf-${{ steps.version.outputs.version }}-windows
+          path: dist/atlas
+      - name: Publish
+        if: ${{ inputs.publish }}
+        shell: pwsh
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $pre = if ($env:VERSION -match '-') { @('--pre') } else { @() }
+          vpk upload github --repoUrl "https://github.com/$env:GITHUB_REPOSITORY" --token $env:GH_TOKEN `
+            --outputDir dist/atlas --publish --releaseName "Atlas PDF v$env:VERSION" --tag "v$env:VERSION" `
+            --targetCommitish $env:GITHUB_SHA @pre
+          if ($LASTEXITCODE -ne 0) { exit 1 }
