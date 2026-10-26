@@ -2733,3 +2733,12 @@ key	Space	Mellomrom
 	Rotate the selected pages clockwise	Roter de valgte sidene med klokken
 	Extract the selected pages…	Trekk ut de valgte sidene…
 	Delete the selected pages	Slett de valgte sidene
+
+# Several windows (M14): the Window menu, the tab context menu, the limit notice.
+	Window	Vindu
+	Move tab to new window	Flytt fanen til nytt vindu
+	Merge all windows	Slå sammen alle vinduer
+	Close window	Lukk vinduet
+	Move to new window	Flytt til nytt vindu
+	Move to window	Flytt til vindu
+	Too many windows are open	For mange vinduer er åpne

@@ -2804,3 +2804,12 @@ theme	Appearance	ظاهر
 	two cells would both be named {name}	دو خانه هر دو با نام {name} نام‌گذاری می‌شوند
 	a field named {name} already exists	فیلدی با نام {name} از قبل وجود دارد
 	Today	امروز
+
+# Several windows (M14): the Window menu, the tab context menu, the limit notice.
+	Window	پنجره
+	Move tab to new window	انتقال زبانه به پنجره جدید
+	Merge all windows	ادغام همه پنجره‌ها
+	Close window	بستن پنجره
+	Move to new window	انتقال به پنجره جدید
+	Move to window	انتقال به پنجره
+	Too many windows are open	پنجره‌های زیادی باز است
