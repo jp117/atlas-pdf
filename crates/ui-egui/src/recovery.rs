@@ -8,8 +8,19 @@
 //!
 //! Encrypted documents are stored encrypted (the working file is), so recovery never writes
 //! plaintext of a protected document to disk. The web build has no recovery store yet.
+//!
+//! On Unix the folder is owner-only (`0o700`), so other accounts on the machine can't read the
+//! snapshots of documents that aren't encrypted.
+//!
+//! A running instance holds an exclusively locked `instance-<pid>-<n>.lock` in the folder and
+//! names it in the snapshots it writes, so a second instance can tell live autosaves from a
+//! crash's leftovers and neither offers nor discards them (#2166). The OS releases the lock
+//! when the process dies.
 
+use std::fs::{File, TryLockError};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
 
 use crate::PdfCraftApp;
 
@@ -27,17 +38,129 @@ pub struct RecoveryMeta {
     pub saved_at: u64,
     /// The bytes are encrypted; recovering asks for the password.
     pub encrypted: bool,
+    /// The lock file of the instance that wrote the snapshot (see the module doc); missing in
+    /// snapshots from before it.
+    #[serde(default)]
+    pub instance: Option<String>,
 }
 
 /// The recovery folder.
 #[derive(Clone, Debug)]
 pub struct RecoveryStore {
     dir: PathBuf,
+    /// This instance's lock, held while it runs and shared by the store's clones (one store,
+    /// one instance). Unset until [`claim`](Self::claim); `Some(None)` when claiming failed
+    /// (the folder can't be written, or the platform has no file locks).
+    lock: Arc<OnceLock<Option<InstanceLock>>>,
 }
+
+/// An open, exclusively locked `instance-<pid>-<n>.lock` in the folder, released and removed
+/// with the last clone of its store.
+#[derive(Debug)]
+struct InstanceLock {
+    name: String,
+    path: PathBuf,
+    file: File,
+}
+
+impl Drop for InstanceLock {
+    fn drop(&mut self) {
+        let _ = self.file.unlock();
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+/// Tells this process's stores apart: tests make several, and a dropped one's lock is free.
+static CLAIMS: AtomicU64 = AtomicU64::new(0);
 
 impl RecoveryStore {
     pub fn new(dir: impl Into<PathBuf>) -> Self {
-        Self { dir: dir.into() }
+        Self { dir: dir.into(), lock: Arc::default() }
+    }
+
+    /// Create the folder if it is missing. On Unix only the owner may open it: snapshots are
+    /// unsaved copies of open documents, and with the default mode other accounts on the
+    /// machine could read them. A folder an earlier version made is tightened too. A volume
+    /// that can't change modes (FAT, some network shares) works as before, with one warning in
+    /// the log.
+    fn create_dir(&self) -> std::io::Result<()> {
+        std::fs::create_dir_all(&self.dir)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let open_to_others = std::fs::metadata(&self.dir).is_ok_and(|m| m.permissions().mode() & 0o077 != 0);
+            if open_to_others && let Err(e) = std::fs::set_permissions(&self.dir, std::fs::Permissions::from_mode(0o700)) {
+                static WARNED: std::sync::Once = std::sync::Once::new();
+                WARNED.call_once(|| log::warn!("recovery folder {} can't be made owner-only: {e}", self.dir.display()));
+            }
+        }
+        Ok(())
+    }
+
+    /// Mark the folder as in use by a running instance (see the module doc). Without a lock
+    /// (the folder can't be written, or the platform has no file locks) snapshots are written
+    /// and offered as before.
+    pub fn claim(&self) {
+        self.lock.get_or_init(|| {
+            if let Err(e) = self.create_dir() {
+                log::warn!("recovery folder {} can't be made: {e}", self.dir.display());
+                return None;
+            }
+            let name = format!("instance-{}-{}.lock", std::process::id(), CLAIMS.fetch_add(1, Ordering::Relaxed));
+            let path = self.dir.join(&name);
+            let locked = File::options().read(true).write(true).create(true).truncate(false).open(&path).and_then(|file| match file.try_lock() {
+                Ok(()) => Ok(file),
+                Err(TryLockError::WouldBlock) => Err(std::io::Error::new(std::io::ErrorKind::WouldBlock, "held by another instance")),
+                Err(TryLockError::Error(e)) => Err(e),
+            });
+            match locked {
+                Ok(file) => Some(InstanceLock { name, path, file }),
+                Err(e) => {
+                    let _ = std::fs::remove_file(&path);
+                    log::warn!("recovery folder {} can't be claimed: {e}", self.dir.display());
+                    None
+                }
+            }
+        });
+    }
+
+    fn own_lock(&self) -> Option<&InstanceLock> {
+        self.lock.get().and_then(Option::as_ref)
+    }
+
+    /// The name of this instance's lock file, for the snapshots it writes.
+    pub fn instance(&self) -> Option<String> {
+        self.own_lock().map(|l| l.name.clone())
+    }
+
+    /// Whether `meta` was written by another instance that is still running. A lock file that
+    /// is no longer held is a crash's leftover and is removed. The name comes from the sidecar,
+    /// which is untrusted, so only a plain `instance-….lock` name in the folder is looked at.
+    fn written_by_a_live_instance(&self, meta: &RecoveryMeta) -> bool {
+        let Some(name) = meta.instance.as_deref() else { return false };
+        if self.own_lock().is_some_and(|l| l.name == name) {
+            return false;
+        }
+        let plain = name.starts_with("instance-")
+            && name.ends_with(".lock")
+            && !name.contains("..")
+            && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.');
+        if !plain {
+            return false;
+        }
+        let path = self.dir.join(name);
+        let Ok(file) = File::options().read(true).write(true).open(&path) else { return false };
+        match file.try_lock() {
+            Err(TryLockError::WouldBlock) => true,
+            Ok(()) => {
+                let _ = file.unlock();
+                drop(file);
+                let _ = std::fs::remove_file(&path);
+                false
+            }
+            // Can't tell (no file locks here): offered, as before.
+            Err(TryLockError::Error(_)) => false,
+        }
     }
 
     /// `Recovery` in the portable data folder in portable mode ([`crate::portable`]), otherwise
@@ -67,7 +190,7 @@ impl RecoveryStore {
     /// Write (or replace) an entry. The PDF is written before its metadata, both atomically, so
     /// a listed entry always has complete bytes.
     pub fn write(&self, meta: &RecoveryMeta, bytes: &[u8]) -> std::io::Result<()> {
-        std::fs::create_dir_all(&self.dir)?;
+        self.create_dir()?;
         crate::editing::write_atomically(&self.dir.join(format!("{}.pdf", meta.key)).to_string_lossy(), bytes)?;
         let json = serde_json::to_vec_pretty(meta).map_err(std::io::Error::other)?;
         crate::editing::write_atomically(&self.dir.join(format!("{}.json", meta.key)).to_string_lossy(), &json)
@@ -78,16 +201,17 @@ impl RecoveryStore {
         let _ = std::fs::remove_file(self.dir.join(format!("{key}.pdf")));
     }
 
-    /// Snapshots, newest first. Listing never removes files; missing metadata uses the file name.
+    /// Snapshots, newest first, leaving out what another running instance is autosaving.
+    /// Listing never removes a snapshot; missing metadata uses the file name.
     pub fn list(&self) -> Vec<RecoveryMeta> {
         let Ok(dir) = std::fs::read_dir(&self.dir) else { return Vec::new() };
         let mut out = Vec::new();
         for entry in dir.flatten() {
             let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("pdf") || !entry.file_type().is_ok_and(|t| t.is_file()) {
+            if path.extension().and_then(std::ffi::OsStr::to_str) != Some("pdf") || !entry.file_type().is_ok_and(|t| t.is_file()) {
                 continue;
             }
-            let Some(key) = path.file_stem().and_then(|s| s.to_str()) else { continue };
+            let Some(key) = path.file_stem().and_then(std::ffi::OsStr::to_str) else { continue };
             let meta = std::fs::read(path.with_extension("json"))
                 .and_then(|b| serde_json::from_slice::<RecoveryMeta>(&b).map_err(std::io::Error::other))
                 .and_then(|m| if m.key == key { Ok(m) } else { Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "snapshot key mismatch")) });
@@ -106,9 +230,11 @@ impl RecoveryStore {
                     saved_at,
                     // This is only a display hint; opening the PDF still detects encryption.
                     encrypted: false,
+                    instance: None,
                 }
             }));
         }
+        out.retain(|m| !self.written_by_a_live_instance(m));
         out.sort_by_key(|m| std::cmp::Reverse(m.saved_at));
         out
     }
@@ -142,7 +268,7 @@ impl RecoveryStore {
         for entry in dir.flatten() {
             let path = entry.path();
             // Only sidecars whose PDF is gone: they hold no document content.
-            if path.extension().and_then(|e| e.to_str()) == Some("json")
+            if path.extension().and_then(std::ffi::OsStr::to_str) == Some("json")
                 && entry.file_type().is_ok_and(|t| t.is_file())
                 && !path.with_extension("pdf").exists()
             {
@@ -159,6 +285,7 @@ fn now_secs() -> u64 {
 impl PdfCraftApp {
     /// Turn on autosave into `store`, and look for documents a previous session left behind.
     pub fn enable_recovery(&mut self, store: RecoveryStore) {
+        store.claim();
         self.recoverable = store.list();
         if !self.recoverable.is_empty() {
             self.dialog = Some(crate::Dialog::Recovery);
@@ -171,7 +298,8 @@ impl PdfCraftApp {
         let Some(store) = self.recovery.clone() else { return };
         for snap in self.session.autosave_snapshots() {
             let key = self.recovery_keys.entry(snap.doc).or_insert_with(|| format!("{}-{}-{}", now_secs(), std::process::id(), snap.doc.0)).clone();
-            let meta = RecoveryMeta { key, name: snap.name, path: snap.path, saved_at: now_secs(), encrypted: snap.encrypted };
+            let meta =
+                RecoveryMeta { key, name: snap.name, path: snap.path, saved_at: now_secs(), encrypted: snap.encrypted, instance: store.instance() };
             if let Err(e) = store.write(&meta, &snap.bytes) {
                 log::warn!("autosave failed: {e}");
             }
@@ -185,14 +313,32 @@ impl PdfCraftApp {
         }
     }
 
-    /// Autosave when the interval has passed (called every frame).
-    pub(crate) fn autosave_tick(&mut self, now: f64) {
+    /// Autosave when the interval has passed (called by `logic`, which also runs while hidden).
+    ///
+    /// The deadline is monotonic (`web_time::Instant`): egui's input clock does not advance
+    /// during a hidden `run_logic`, so using it would stall autosave or restart its interval.
+    pub(crate) fn autosave_tick(&mut self, ctx: &egui::Context, now: web_time::Instant) {
         if self.recovery.is_none() {
             return;
         }
-        if now - self.last_autosave >= AUTOSAVE_SECS {
-            self.last_autosave = now;
+        // The first tick starts the interval, as the old zero clock did: it does not snapshot
+        // immediately just because no deadline had been recorded yet.
+        let Some(last) = self.last_autosave else {
+            self.last_autosave = Some(now);
+            if self.session.has_pending_autosave() {
+                ctx.request_repaint_after(std::time::Duration::from_secs_f64(AUTOSAVE_SECS));
+            }
+            return;
+        };
+        if now.duration_since(last).as_secs_f64() >= AUTOSAVE_SECS {
+            self.last_autosave = Some(now);
             self.autosave_now();
+        }
+        // An idle native window has no input-driven frames. Wake it at the existing
+        // autosave deadline, without keeping clean or already-snapshotted documents awake.
+        if self.session.has_pending_autosave() {
+            let next = self.last_autosave.unwrap_or(now) + std::time::Duration::from_secs_f64(AUTOSAVE_SECS);
+            ctx.request_repaint_after(next.saturating_duration_since(now));
         }
     }
 
@@ -278,6 +424,174 @@ impl PdfCraftApp {
                 store.remove(key);
             }
             self.recovery_keys.clear();
+        }
+    }
+}
+
+#[cfg(test)]
+mod idle_tests {
+    use super::*;
+    use std::time::Duration;
+
+    struct TestDir(PathBuf);
+
+    impl TestDir {
+        /// A new folder of this test's own. The tests run on parallel threads of one process, and
+        /// two can read the same clock time (it moves in microseconds on macOS), so a counter
+        /// tells their folders apart; the time keeps runs of the process apart.
+        fn new() -> Self {
+            static NEXT: AtomicU64 = AtomicU64::new(0);
+            let n = NEXT.fetch_add(1, Ordering::Relaxed);
+            let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+            let path = std::env::temp_dir().join(format!("pdfcraft-idle-recovery-{}-{nonce}-{n}", std::process::id()));
+            std::fs::create_dir(&path).unwrap();
+            Self(path)
+        }
+
+        /// The folder.
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TestDir {
+        /// Remove the folder and what the test left in it.
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// Folders made at the same moment on parallel threads, as the tests make theirs, are each
+    /// their own: none fails because another test's folder took its name.
+    #[test]
+    fn test_folders_made_at_once_on_parallel_threads_are_each_their_own() {
+        let start = std::sync::Barrier::new(8);
+        let dirs: Vec<PathBuf> = std::thread::scope(|s| {
+            let threads: Vec<_> = (0..8)
+                .map(|_| {
+                    s.spawn(|| {
+                        start.wait();
+                        (0..25).map(|_| TestDir::new()).collect::<Vec<_>>()
+                    })
+                })
+                .collect();
+            threads.into_iter().flat_map(|t| t.join().unwrap()).map(|d| d.path().to_path_buf()).collect()
+        });
+        let distinct: std::collections::HashSet<&PathBuf> = dirs.iter().collect();
+        assert_eq!(distinct.len(), 200);
+    }
+
+    fn frame(app: &mut PdfCraftApp, ctx: &egui::Context, now: web_time::Instant) -> Duration {
+        let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+            app.autosave_tick(ui.ctx(), now);
+        });
+        // Headless timer test: acknowledge texture uploads without a GPU backend.
+        out.textures_delta.clear();
+        out.viewport_output[&egui::ViewportId::ROOT].repaint_delay
+    }
+
+    /// Check that an idle dirty document schedules a bounded write and autosaves without input, then stops
+    /// waking the window.
+    #[test]
+    fn idle_dirty_document_requests_its_deadline_and_writes_without_input() {
+        let dir = TestDir::new();
+        let store = RecoveryStore::new(dir.path());
+        let mut app = PdfCraftApp::new();
+        app.enable_recovery(store.clone());
+        let bytes = app.session.create_blank(200.0, 300.0, 1).unwrap();
+        let id = app.session.open_new("Untitled.pdf", bytes).unwrap();
+        let ctx = egui::Context::default();
+        let base = web_time::Instant::now();
+        frame(&mut app, &ctx, base);
+        let mut delay = Duration::ZERO;
+        for _ in 0..4 {
+            delay = frame(&mut app, &ctx, base + Duration::from_secs(15));
+        }
+        assert!(delay > Duration::ZERO && delay <= Duration::from_secs(45), "idle deadline: {delay:?}");
+        assert!(store.list().is_empty());
+        frame(&mut app, &ctx, base + Duration::from_secs(60));
+        assert_eq!(store.list().len(), 1, "timer frame writes the snapshot without input");
+        assert!(app.session.get(id).unwrap().dirty, "autosave does not mark the document saved");
+        assert!(!app.session.has_pending_autosave());
+        for _ in 0..4 {
+            delay = frame(&mut app, &ctx, base + Duration::from_secs(61));
+        }
+        assert_eq!(delay, Duration::MAX, "unchanged snapshot needs no periodic wake");
+    }
+
+    /// Check that an edit after autosave schedules the next deadline, keeps the old snapshot until then, and
+    /// replaces it on time.
+    #[test]
+    fn second_edit_after_autosave_schedules_next_deadline_and_updates_snapshot() {
+        let dir = TestDir::new();
+        let store = RecoveryStore::new(dir.path());
+        let mut app = PdfCraftApp::new();
+        app.enable_recovery(store.clone());
+        let bytes = app.session.create_blank(200.0, 300.0, 1).unwrap();
+        let id = app.session.open_new("Untitled.pdf", bytes).unwrap();
+        let ctx = egui::Context::default();
+        let base = web_time::Instant::now();
+        frame(&mut app, &ctx, base);
+        frame(&mut app, &ctx, base + Duration::from_secs(60));
+        let entries = store.list();
+        assert_eq!(entries.len(), 1);
+        let key = entries[0].key.clone();
+        let first = store.read(&key).unwrap();
+        assert!(!app.session.has_pending_autosave());
+        let mut delay = Duration::ZERO;
+        for _ in 0..4 {
+            delay = frame(&mut app, &ctx, base + Duration::from_secs(61));
+        }
+        assert_eq!(delay, Duration::MAX);
+
+        app.session.apply(id, pdfcraft_engine::Edit::SetInfo { key: "Title".into(), value: "Second edit".into() }).unwrap();
+        assert!(app.session.has_pending_autosave());
+        for _ in 0..4 {
+            delay = frame(&mut app, &ctx, base + Duration::from_secs(75));
+        }
+        assert!(delay > Duration::ZERO && delay <= Duration::from_secs(45), "second edit wakes by 120 seconds: {delay:?}");
+        assert_eq!(store.read(&key).unwrap(), first, "editing does not overwrite the snapshot before its deadline");
+        frame(&mut app, &ctx, base + Duration::from_secs(119));
+        assert_eq!(store.read(&key).unwrap(), first);
+        frame(&mut app, &ctx, base + Duration::from_secs(120));
+        let entries = store.list();
+        assert_eq!(entries.len(), 1, "the same document replaces its existing snapshot");
+        assert_eq!(entries[0].key, key);
+        let second = store.read(&key).unwrap();
+        assert_ne!(second, first);
+        let mut recovered = pdfcraft_engine::Session::new();
+        let restored = recovered.open("Snapshot.pdf", None, second.into(), None).unwrap();
+        assert_eq!(recovered.get(restored).unwrap().info_value("Title"), Some("Second edit".into()));
+        assert!(app.session.get(id).unwrap().dirty);
+        assert!(!app.session.has_pending_autosave());
+        for _ in 0..4 {
+            delay = frame(&mut app, &ctx, base + Duration::from_secs(121));
+        }
+        assert_eq!(delay, Duration::MAX, "the second snapshot also lets the window sleep");
+    }
+
+    /// Check that a clean document and a document with recovery disabled never schedule an autosave.
+    #[test]
+    fn clean_documents_and_disabled_recovery_do_not_schedule_autosave() {
+        for recovery_enabled in [false, true] {
+            let dir = TestDir::new();
+            let mut app = PdfCraftApp::new();
+            if recovery_enabled {
+                app.enable_recovery(RecoveryStore::new(dir.path()));
+            }
+            let bytes = app.session.create_blank(200.0, 300.0, 1).unwrap();
+            if recovery_enabled {
+                app.session.open("Clean.pdf", None, bytes, None).unwrap();
+            } else {
+                app.session.open_new("Unsaved.pdf", bytes).unwrap();
+            }
+            let ctx = egui::Context::default();
+            let base = web_time::Instant::now();
+            let mut delay = Duration::ZERO;
+            for _ in 0..4 {
+                delay = frame(&mut app, &ctx, base + Duration::from_secs(15));
+            }
+            assert_eq!(delay, Duration::MAX);
         }
     }
 }

@@ -132,7 +132,7 @@ code is kept out of upstream files so merges stay cheap:
 Upstream files carry one- to three-line hooks, each marked `Atlas fork`:
 - `engine/src/lib.rs`: the takeoff edits and SHX filtering;
 - `render/src/{text,inspect,lib}.rs`;
-- `ui-egui/src/{lib,canvas,chrome,control,editing,docking,panels}.rs`;
+- `ui-egui/src/{lib,canvas,chrome,control,editing,panels}.rs`;
 - `automation/src/{lib,tools}.rs`;
 - `xtask/src/layers.rs`.
 

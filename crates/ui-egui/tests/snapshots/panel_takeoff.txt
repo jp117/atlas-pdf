@@ -1,0 +1,12 @@
+Label = "Takeoff"
+Button "Close" [off]
+Button "■ Included  0" [off]
+Button "■ Included w/ comments  0" [off]
+Button "■ Excluded  0" [off]
+Label = "Drag a box over equipment; click a box to select it. 1, 2, 3 re-mark the selected box (or pick the tool when none is selected); Delete removes it."
+CheckBox "Included" [on]
+CheckBox "Included w/ comments" [on]
+CheckBox "Excluded" [on]
+CheckBox "This page only" [off]
+Label = "No takeoff marks yet."
+Button "Export takeoff as CSV…" [disabled]

@@ -121,10 +121,14 @@ neither the MSI nor the portable zip needs the Visual C++ redistributable.
   dialogs. Full UI confirms success with Finish; failures and cancellations have distinct messages.
   The welcome dialog has a "Create a desktop shortcut" checkbox and an "Edit with PdfCraft"
   right-click menu checkbox, both ticked by default. `/qn` and `/qb` stay unattended and create
-  both unless `INSTALLDESKTOPSHORTCUT=0` or `INSTALLPDFCONTEXTMENU=0` is passed. An update (the
-  launcher runs `msiexec /passive` with no properties) keeps the desktop shortcut only if
-  `PdfCraft.lnk` is still on the all-users desktop, so deleting it once keeps it away (#1058); a
-  value given on the command line wins.
+  both unless `INSTALLDESKTOPSHORTCUT=0` or `INSTALLPDFCONTEXTMENU=0` is passed;
+  `INSTALLIMAGECONTEXTMENU=0` (no checkbox) leaves out the image menu. An update (the launcher runs
+  `msiexec /passive` with no properties) keeps the desktop shortcut only if `PdfCraft.lnk` is still
+  on the all-users desktop, so deleting it once keeps it away (#1058), and keeps each menu only if
+  its key path is still in HKLM (#305). Both are AppSearch results read before the old version is
+  removed. An update from a release that didn't have a menu yet (before 0.7.1 for the PDF menu,
+  before 0.4.0 for the image menu, found by `OnlyDetect` Upgrade rows) adds it like a first install.
+  A value given on the command line wins.
 - The PDF right-click entry (#682) is a classic verb under
   `HKLM\Software\Classes\SystemFileAssociations\.pdf\shell\PdfCraft.Edit`, so it shows whichever app
   is the default for `.pdf` and never changes that default. Several selected PDFs (up to 15, the
@@ -132,15 +136,30 @@ neither the MSI nor the portable zip needs the Visual C++ redistributable.
   hand-off opens them as tabs. On Windows 11 it is under "Show more options"; a first-level entry
   needs an `IExplorerCommand` handler and package identity (a sparse MSIX package), which the MSI
   doesn't have.
+- The image right-click entry (#190) is the same kind of verb, `PdfCraft.CreatePdf`, for ten image
+  types, in its own component (`PdfcraftImageContextMenu`) since it became optional. Its rows moved
+  out of `PdfcraftApp`; that's safe because `MajorUpgrade` removes the old version before installing
+  the new one (`afterInstallValidate`), which `test-msi.ps1` checks.
 - `test-msi.ps1 <file.msi>` checks the compiled shortcut, context-menu and dialog tables, and
-  evaluates the desktop shortcut's first-install and update conditions. Packaging
+  evaluates the first-install and update conditions of the desktop shortcut and both menus. Packaging
   runs it in a child process before signing, so the MSI isn't held open when signtool runs. The ARM64 install
   smoke test checks that both all-users shortcuts point at the installed `pdfcraft.exe` and are
   removed on uninstall, and that `INSTALLDESKTOPSHORTCUT=0` skips the desktop one.
 - The portable zip holds both executables, the README, the licences, the OFL licence of each
   embedded craft-fonts family, and `portable.txt`. That marker beside `pdfcraft.exe` keeps the
   settings, logs, crash recovery and new digital IDs in `PdfCraftData\` next to the exe instead of
-  `%APPDATA%` and `%LOCALAPPDATA%` (`crates/ui-egui/src/portable.rs`).
+  `%APPDATA%` and `%LOCALAPPDATA%` (`crates/ui-egui/src/portable.rs`). The MSI carries the same
+  OFL notices; `-SkipBuild` requires `CRAFT_FONTS_DIR` so they can be staged, or
+  `-BuiltWithoutCraftFonts` for binaries built without that input, and `test-msi.ps1` checks that
+  the compiled MSI has OFL notice rows when expected (and none for a no-font build).
+  Before either package is created, `font-notices.ps1` validates every declared OFL notice in
+  `fonts/manifest.txt` and the native `fonts/simplified-chinese-manifest.txt` when present
+  (required when `CRAFT_FONTS_REQUIRED` is set). Missing or empty family notices fail packaging;
+  one family's notice cannot cover another. The check conservatively includes declared faces
+  omitted by build-time size caps. `test-font-notices.ps1` exercises these failures in CI.
+  The supplied checkout must match the existing binaries when using `-SkipBuild`.
+  That presence check does not establish byte-for-byte payload or installation coverage;
+  final package qualification still checks all notices against the staged files.
 - **Signing:** `packaging/windows/sign.ps1` signs both executables and the MSI with `signtool`
   (SHA-256, RFC 3161 timestamp), from a `.pfx` (`WINDOWS_CERTIFICATE`) or Azure Trusted Signing
   (`AZURE_*`), whichever is configured. It is the one place to change when signing changes.

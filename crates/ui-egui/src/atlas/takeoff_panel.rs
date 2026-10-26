@@ -46,7 +46,32 @@ enum Action {
     Export,
 }
 
-pub(crate) fn show(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
+/// The Takeoff side panel: a header like the other side panels' (`panels::right_panel`), then
+/// the panel.
+pub(crate) fn side_panel(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
+    let t = crate::theme::Tokens::get(ui.ctx());
+    let mut close = false;
+    egui::Frame::NONE
+        .fill(t.panel)
+        .inner_margin(egui::Margin { left: 14, right: 12, top: 12, bottom: 8 })
+        .stroke(egui::Stroke::new(1.0, t.divider))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Takeoff").font(crate::theme::semibold(15.5)));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if crate::icons::button(ui, "x", 26.0, false, "Close").clicked() {
+                        close = true;
+                    }
+                });
+            });
+            show(app, ui);
+        });
+    if close {
+        app.choose_right_panel(None);
+    }
+}
+
+fn show(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
     egui::ScrollArea::vertical().id_salt("atlas-takeoff-panel").auto_shrink([false, false]).show(ui, |ui| {
         ui.add_space(6.0);
         let action = body(app, ui);
