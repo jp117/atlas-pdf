@@ -5,6 +5,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 static STAGING_ID: AtomicU64 = AtomicU64::new(0);
 
+/// The preferences folder's name under the XDG configuration base. Atlas fork: Atlas PDF's own,
+/// apart from an installed PdfCraft's.
+const FOLDER: &str = pdfcraft_atlas::brand::DATA_NAME_LOWER;
+
 pub fn directory(
     xdg: bool,
     portable: Option<&Path>,
@@ -20,7 +24,7 @@ pub fn directory(
     }
     // XDG requires absolute environment paths; empty and relative overrides are ignored.
     let preferred = config_home.filter(|p| p.is_absolute()).or_else(|| home.filter(|p| p.is_absolute()).map(|p| p.join(".config")));
-    let Some(preferred) = preferred.map(|p| p.join("pdfcraft")) else { return Ok(legacy) };
+    let Some(preferred) = preferred.map(|p| p.join(FOLDER)) else { return Ok(legacy) };
     let target = preferred.join("app.ron");
     if std::fs::symlink_metadata(&target).is_ok() {
         return Ok(Some(preferred));
@@ -93,7 +97,16 @@ mod tests {
         let fixture = Fixture::new();
         let home = fixture.0.join("home");
         let data = home.join(".local/share/pdfcraft");
-        assert_eq!(directory(true, None, Some(data), None, Some(home.clone())).unwrap(), Some(home.join(".config/pdfcraft")));
+        assert_eq!(directory(true, None, Some(data), None, Some(home.clone())).unwrap(), Some(home.join(".config").join(FOLDER)));
+    }
+
+    /// Atlas fork: the XDG preferences are Atlas PDF's, never an installed PdfCraft's
+    /// `~/.config/pdfcraft`.
+    #[test]
+    fn xdg_preferences_are_atlas_pdfs_own() {
+        let fixture = Fixture::new();
+        let config = fixture.0.join("config");
+        assert_eq!(directory(true, None, None, Some(config.clone()), None).unwrap(), Some(config.join("atlaspdf")));
     }
 
     struct Fixture(PathBuf);
@@ -116,9 +129,9 @@ mod tests {
         let f = Fixture::new();
         let home = f.0.join("home");
         let config = f.0.join("custom-config");
-        assert_eq!(directory(true, None, None, Some(config.clone()), Some(home.clone())).unwrap(), Some(config.join("pdfcraft")));
+        assert_eq!(directory(true, None, None, Some(config.clone()), Some(home.clone())).unwrap(), Some(config.join(FOLDER)));
         for invalid in [PathBuf::new(), PathBuf::from("relative")] {
-            assert_eq!(directory(true, None, None, Some(invalid), Some(home.clone())).unwrap(), Some(home.join(".config/pdfcraft")));
+            assert_eq!(directory(true, None, None, Some(invalid), Some(home.clone())).unwrap(), Some(home.join(".config").join(FOLDER)));
         }
         assert_eq!(directory(true, None, Some(f.0.clone()), None, None).unwrap(), Some(f.0.clone()));
     }
@@ -133,7 +146,7 @@ mod tests {
         std::fs::write(data.join("recovery/unsaved.pdf"), b"UNSAVED").unwrap();
         std::fs::write(data.join("digital-id.p12"), b"KEY").unwrap();
         let selected = directory(true, None, Some(data.clone()), Some(config.clone()), None).unwrap().unwrap();
-        assert_eq!(selected, config.join("pdfcraft"));
+        assert_eq!(selected, config.join(FOLDER));
         assert_eq!(std::fs::read(selected.join("app.ron")).unwrap(), std::fs::read(data.join("app.ron")).unwrap());
         assert_eq!(std::fs::read(data.join("recovery/unsaved.pdf")).unwrap(), b"UNSAVED");
         assert_eq!(std::fs::read(data.join("digital-id.p12")).unwrap(), b"KEY");
@@ -149,7 +162,7 @@ mod tests {
     fn existing_or_concurrently_created_preferences_are_never_replaced() {
         let f = Fixture::new();
         let source = f.0.join("old.ron");
-        let config = f.0.join("config/pdfcraft");
+        let config = f.0.join("config").join(FOLDER);
         std::fs::write(&source, b"OLD").unwrap();
         std::fs::create_dir_all(&config).unwrap();
         let target = config.join("app.ron");
