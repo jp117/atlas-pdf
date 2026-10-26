@@ -1,13 +1,14 @@
 //! PdfCraft desktop app.
 //!
-//! Usage: `pdfcraft [options] [files…]`
+//! Usage: `pdfcraft [options] [files…]` (`-h` / `--help` prints a short version of this, [`USAGE`]).
 //! `--create-images [images…]` stages the images in one PDF and asks for the page DPI.
 //!
 //! View options (applied after the files open; also the seed of the UI control channel):
 //! `--page N  --zoom 150  --layout single|continuous|two-up|two-page  --continuous on|off  --panel comments|bookmarks|pages|fields|layers|attachments|none
 //!  --theme light|dark|system  --language auto|<code>  --mode all|read|edit|convert|sign  --tool <catalogue id>  --left open|closed
 //!  --organize on  --fields on  --dialog properties|shortcuts|about  --palette <query>  --home on
-//!  --cover on|off  --default-layout single|continuous|two-up|two-page  --default-continuous on|off  --default-zoom fit-width|fit-page|<percent>
+//!  --cover on|off  --default-layout single|continuous|two-up|two-page  --default-continuous on|off  --default-zoom fit-width|fit-page|<percent>  --always-default-view on|off
+//!  --page-gaps on|off  --default-page-gaps on|off
 //!  --combine-view grid|list  --combine-zoom 60..200`
 //!
 //! `--new-window` opens a window of its own. Without it, on Windows, a launch that only names files
@@ -42,6 +43,7 @@ mod logging;
 #[cfg(target_os = "windows")]
 mod motion;
 mod reopen;
+mod settings;
 mod single_instance;
 mod text_scale;
 mod updates;
@@ -59,17 +61,54 @@ const APP_ICON_PNG: &[u8] = include_bytes!("../../../assets/app-icon/pdfcraft-10
 #[cfg(not(target_os = "macos"))]
 const APP_ICON_PNG: &[u8] = include_bytes!("../../../assets/app-icon/hicolor/256x256/apps/ai.storyteller.pdfcraft.png");
 
+/// What `-h` / `--help` prints (#4076): a hint, not the full option list (that is this file's
+/// doc comment and the README). Scripts want `pdfcraft-cli`, which never opens a window.
+const USAGE: &str = "\
+Usage: pdfcraft [options] [files…]
+
+Opens the files in the PdfCraft desktop app.
+
+Options:
+  --new-window                open a window of its own instead of passing the files to a running PdfCraft
+  --create-images [images…]   put the images in one PDF and ask for the page DPI
+  --control <file>            enable the UI control channel (pdfcraft-cli ui --control <file> …)
+  --page N, --zoom 150, --layout continuous, --theme dark, …
+                              view settings applied once the files are open
+  -h, --help                  print this and exit
+  --version                   print the version and exit
+
+To inspect, convert or edit PDFs from a script, use pdfcraft-cli (pdfcraft-cli --help).";
+
+/// Print `text` for `--help` and `--version`. `println!` would panic on a full or closed
+/// standard output; this exits normally instead.
+fn print_and_exit(text: &str) -> eframe::Result {
+    use std::io::Write;
+    let _ = writeln!(std::io::stdout().lock(), "{text}");
+    Ok(())
+}
+
 /// The app was called PrintCraft before; settings saved then are under this key.
 const LEGACY_STORAGE_KEY: &str = "printcraft";
 
-/// The settings folder: `app.ron` and the `logs` folder (docs/development.md). In portable mode
-/// it is the portable data folder beside the executable (#157). eframe would otherwise derive it
-/// from the app id. Atlas fork: `AtlasPDF`, apart from an installed PdfCraft's.
+/// The preferences folder (`app.ron`, docs/development.md). In portable mode it is the portable
+/// data folder beside the executable (#157). XDG desktops use the configuration base; other
+/// platforms keep eframe's folder. Logs and recovery stay in the data folder. Atlas fork:
+/// `AtlasPDF`, apart from an installed PdfCraft's.
 fn settings_dir() -> Option<std::path::PathBuf> {
-    if let Some(dir) = pdfcraft_ui_egui::portable::data_dir() {
-        return Some(dir.to_path_buf());
+    let legacy = eframe::storage_dir(pdfcraft_atlas::brand::DATA_NAME);
+    match settings::directory(
+        cfg!(all(unix, not(target_os = "macos"))),
+        pdfcraft_ui_egui::portable::data_dir(),
+        legacy.clone(),
+        std::env::var_os("XDG_CONFIG_HOME").map(std::path::PathBuf::from),
+        std::env::home_dir(),
+    ) {
+        Ok(dir) => dir,
+        Err(e) => {
+            log::warn!("could not migrate preferences to the XDG configuration folder; using the original location: {e}");
+            legacy
+        }
     }
-    eframe::storage_dir(pdfcraft_atlas::brand::DATA_NAME)
 }
 
 /// Move the settings and crash-recovery folders of the app's former name, PrintCraft, to the new
@@ -80,7 +119,7 @@ fn migrate_legacy_folders() {
     if pdfcraft_ui_egui::portable::data_dir().is_some() {
         return;
     }
-    let mut moves = vec![(eframe::storage_dir("PrintCraft"), settings_dir())];
+    let mut moves = vec![(eframe::storage_dir("PrintCraft"), eframe::storage_dir("PdfCraft"))];
     // Recovery lives in the settings folder except on Windows, where it is under %LOCALAPPDATA%.
     if cfg!(windows) {
         let local = std::env::var_os("LOCALAPPDATA").filter(|v| !v.is_empty()).map(std::path::PathBuf::from);
@@ -192,10 +231,9 @@ fn main() -> eframe::Result {
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
-            "--version" => {
-                println!("pdfcraft {}", pdfcraft_engine::build_info::version());
-                return Ok(());
-            }
+            "--version" => return print_and_exit(&format!("pdfcraft {}", pdfcraft_engine::build_info::version())),
+            // Before any window or log file, so a scripted call returns (#4076).
+            "-h" | "--help" => return print_and_exit(USAGE),
             "--control" => control_file = args.next(),
             "--create-images" => create_images = true,
             "--new-window" => new_window = true,
@@ -211,21 +249,28 @@ fn main() -> eframe::Result {
     // GNOME on Wayland leaves the window frame to the app (src/decorations.rs).
     let window_controls = if cfg!(any(target_os = "macos", target_os = "windows")) { None } else { decorations::app_drawn() };
     migrate_legacy_folders();
-    // The log file lives in the settings folder; opened after the arguments (so `--version` leaves
+    // The log file stays in the data folder; opened after the arguments (so `--version` leaves
     // no file behind) and after the PrintCraft migration (which a fresh folder would block).
     // Records logged until now are written to it first.
-    if let (Some(logger), Some(dir)) = (logger, settings_dir()) {
+    if let (Some(logger), Some(dir)) = (
+        logger,
+        pdfcraft_ui_egui::portable::data_dir().map(std::path::Path::to_path_buf).or_else(|| eframe::storage_dir(pdfcraft_atlas::brand::DATA_NAME)),
+    ) {
         match logger.attach_dir(&dir.join("logs")) {
             Ok(path) => log::info!("PdfCraft {}, log file {}", pdfcraft_engine::build_info::version(), path.display()),
             // Standard error only by now (`attach_dir` gave up on the file); unlike `eprintln!`, never panics.
             Err(e) => log::warn!("no log file: {e}"),
         }
     }
-    // Windows: a launch that only names files (an Outlook attachment, an Explorer double-click)
-    // hands them to the PdfCraft already running and exits (#282, #317). Any option means the
-    // caller wants this launch's own window.
+    // Windows, Linux and the BSDs: a launch that only names files (an Outlook attachment, an
+    // Explorer double-click, a file manager or `xdg-open`) hands them to the PdfCraft already
+    // running and exits (#282, #317, #1726). Any option means the caller wants this launch's own
+    // window.
     let may_hand_off = !new_window && !files.is_empty() && options.is_empty() && control_file.is_none() && !create_images;
-    let instance = match single_instance::claim(&single_instance::absolute(&files), may_hand_off) {
+    // Absolute for this instance too: links relative to a document resolve against its folder,
+    // never the working directory.
+    let files = single_instance::absolute(&files);
+    let instance = match single_instance::claim(&files, may_hand_off) {
         single_instance::Claim::HandedOff => return Ok(()),
         single_instance::Claim::Primary(server) => Some(server),
         single_instance::Claim::Alone => None,
@@ -326,6 +371,9 @@ fn native_options(integrated: bool, app_frame: bool, renderer: eframe::Renderer)
     let persistence_path = settings_dir().map(|d| d.join("app.ron"));
     // Set explicitly, so the renderer never depends on which one eframe defaults to.
     let mut native = eframe::NativeOptions { viewport, persistence_path, renderer, ..Default::default() };
+    // PdfCraft installs its own last-resort system face (`PDFCRAFT_SYSTEM_FONTS`); eframe's
+    // provider would read every installed face, including proprietary ones, into every UI pass.
+    native.system_font_fallback = false;
     if renderer == eframe::Renderer::Wgpu {
         configure_gpu(&mut native);
     }
@@ -342,6 +390,18 @@ struct Launch {
     integrated: bool,
     /// The window buttons the app draws, when the desktop leaves the frame to it.
     window_controls: Option<pdfcraft_ui_egui::window_controls::Layout>,
+}
+
+/// Whether the window is a native Wayland one (not X11 or XWayland).
+#[cfg(all(unix, not(target_os = "macos")))]
+fn native_wayland(cc: &eframe::CreationContext<'_>) -> bool {
+    use raw_window_handle::{HasDisplayHandle, RawDisplayHandle};
+    cc.display_handle().is_ok_and(|handle| matches!(handle.as_raw(), RawDisplayHandle::Wayland(_)))
+}
+
+#[cfg(not(all(unix, not(target_os = "macos"))))]
+fn native_wayland(_: &eframe::CreationContext<'_>) -> bool {
+    false
 }
 
 fn app_creator<'a>(
@@ -363,6 +423,7 @@ fn app_creator<'a>(
         if let Some(json) = cc.storage.and_then(|s| s.get_string("pdfcraft").or_else(|| s.get_string(LEGACY_STORAGE_KEY))) {
             app.restore(&json);
         }
+        app.window_state = pdfcraft_ui_egui::window_state::WindowState::started_with(cc.storage);
         app.integrated_titlebar = integrated;
         app.window_controls = window_controls;
         app.system_text_scale = text_scale::system();
@@ -381,9 +442,14 @@ fn app_creator<'a>(
         #[cfg(target_os = "macos")]
         {
             app.os_events = Some(apple_events.connect(&cc.egui_ctx));
+            // winit's Quit (⌘Q) ends the process without asking about unsaved changes (#1136). This
+            // menu's Quit closes the window instead, so `guard_quit` asks, as for the close button.
+            if let Err(e) = craft_quit::install_app_menu(&cc.egui_ctx, pdfcraft_atlas::brand::APP_NAME) {
+                log::warn!("couldn't install the app menu, so ⌘Q quits without asking to save: {e}");
+            }
         }
         if let Some(server) = instance {
-            app.os_events = Some(server.connect(&cc.egui_ctx));
+            app.os_events = Some(server.connect(&cc.egui_ctx, native_wayland(cc)));
         }
         if let Some(file) = &control_file {
             let client = app.attach_control(&cc.egui_ctx);
@@ -537,6 +603,11 @@ fn write_control_file(path: &str, port: u16, token: &str) -> std::io::Result<()>
 ///   `WGPU_BACKEND` asks for them. Creating a Vulkan instance loads every installed Vulkan driver
 ///   into the process, and a faulty one (an Intel driver in issue #37) crashed PdfCraft before
 ///   its window appeared. D3D12 is the native, best-supported backend there.
+/// - On Windows, Direct3D 12 presents through a DirectComposition visual rather than a swap chain
+///   on the window itself, unless `WGPU_DX12_PRESENTATION_SYSTEM` says otherwise. While the window
+///   is being resized, Windows stretched the window's swap chain, still at the old size, to the
+///   new one, so the text shimmered and the left panel's width bounced for as long as the drag
+///   lasted (issue #2738). A visual's last frame is shown at its own size instead.
 fn configure_gpu(native: &mut eframe::NativeOptions) {
     let eframe::egui_wgpu::WgpuSetup::CreateNew(setup) = &mut native.wgpu_options.wgpu_setup else { return };
     // Nothing draws or dispatches indirectly, so wgpu's check of indirect arguments only costs a
@@ -546,7 +617,7 @@ fn configure_gpu(native: &mut eframe::NativeOptions) {
     setup.instance_descriptor.flags = setup.instance_descriptor.flags.difference(eframe::wgpu::InstanceFlags::VALIDATION_INDIRECT_CALL).with_env();
     // egui-wgpu requests only 8192 pixels even when the adapter can render larger surfaces.
     // A restored 3440-point window at 250% DPI requests 8600 pixels and otherwise panics in
-    // Surface::configure before the app starts. Keep the renderer's other device requirements,
+    // Surface::configure before the app starts. Keep the renderer's other compatible requirements,
     // but enable the adapter's actual 2D texture extent (also for smaller/downlevel adapters).
     let device_descriptor = std::sync::Arc::clone(&setup.device_descriptor);
     setup.device_descriptor = std::sync::Arc::new(move |adapter| {
@@ -584,11 +655,21 @@ fn configure_gpu(native: &mut eframe::NativeOptions) {
     if cfg!(target_os = "windows") && std::env::var_os("WGPU_BACKEND").is_none() {
         setup.instance_descriptor.backends = eframe::wgpu::Backends::DX12 | eframe::wgpu::Backends::GL;
     }
+    if cfg!(target_os = "windows") {
+        setup.instance_descriptor.backend_options.dx12.presentation_system = dx12_presentation(eframe::wgpu::Dx12SwapchainKind::from_env());
+    }
+}
+
+/// How Direct3D 12 presents on Windows: through a DirectComposition visual (issue #2738), unless
+/// `WGPU_DX12_PRESENTATION_SYSTEM` asked for something else (`asked`).
+fn dx12_presentation(asked: Option<eframe::wgpu::Dx12SwapchainKind>) -> eframe::wgpu::Dx12SwapchainKind {
+    asked.unwrap_or(eframe::wgpu::Dx12SwapchainKind::DxgiFromVisual)
 }
 
 /// Surface textures must fit the device's enabled limits, not just the physical GPU's limits.
-/// Changing only the 2D extent preserves egui-wgpu's backend-specific downlevel requirements.
+/// Clamp egui-wgpu's backend-specific requirements before enabling the adapter's full 2D extent.
 fn surface_texture_limits(mut required: eframe::wgpu::Limits, supported: &eframe::wgpu::Limits) -> eframe::wgpu::Limits {
+    required = required.or_worse_values_from(supported);
     required.max_texture_dimension_2d = supported.max_texture_dimension_2d;
     required
 }
@@ -734,6 +815,41 @@ fn pick_adapter(adapters: &[(u32, u32, eframe::wgpu::DeviceType)], displays: &[D
 
 #[cfg(test)]
 mod tests {
+    /// The lockfile package block for `name`, or a panic naming the missing package.
+    fn locked_package(root: &std::path::Path, name: &str) -> String {
+        let lock = std::fs::read_to_string(root.join("Cargo.lock")).expect("Cargo.lock");
+        lock.split("[[package]]")
+            .find(|p| p.contains(&format!("\nname = \"{name}\"\n")))
+            .map(str::to_owned)
+            .unwrap_or_else(|| panic!("{name} is not in Cargo.lock"))
+    }
+
+    /// Interim graph check for the window stack while the reviewed fork revision is not yet
+    /// published. The old `vendor/winit` / `vendor/egui-wgpu` path patches were removed from the
+    /// published manifest; local integration supplies the reviewed worktrees through an external
+    /// Cargo config patch. A git source must name the public storytold fork; a path source is the
+    /// local integration graph. Behaviour (surface fitting, error scopes, scroll phases) is tested
+    /// directly elsewhere; the retained vendor copies keep provenance until the fork revision is
+    /// pinned. No public revision is invented here.
+    fn assert_window_stack_graph(root: &std::path::Path, name: &str, version: &str) -> String {
+        let package = locked_package(root, name);
+        assert!(package.contains(&format!("\nversion = \"{version}\"\n")), "{name} must resolve to {version}: {package}");
+        if let Some(source) = package.lines().find_map(|line| line.strip_prefix("source = ")) {
+            assert!(source.contains("github.com/storytold/"), "{name} must come from the reviewed storytold fork once published, not {source}");
+            assert!(
+                source.split(|c: char| !c.is_ascii_hexdigit()).any(|part| part.len() == 40),
+                "{name} must pin the fork's 40-character revision, not {source}"
+            );
+        }
+        // A path patch has no `source =` in Cargo.lock. The local integration config is the only
+        // allowed path source; a machine-local path must never be in the published manifest,
+        // which the root-manifest assertion below checks. A path entry carries no remote identity
+        // to verify, so this test does not claim the resolved code is the published fork.
+        let manifest = std::fs::read_to_string(root.join("Cargo.toml")).expect("root Cargo.toml");
+        assert!(!manifest.contains(&format!("{name} = {{ path = \"vendor/")), "vendor/{name} must not be a published path patch");
+        package
+    }
+
     use pdfcraft_ui_egui::control::Endpoint;
 
     fn endpoint() -> std::io::Result<Endpoint> {
@@ -744,7 +860,7 @@ mod tests {
     /// graphics libraries at a time. The test threads otherwise run them together, and on
     /// FreeBSD's CI machine the test process then died with SIGSEGV, in about half the runs:
     /// the first device was still being set up when the second test began its own. The UI
-    /// tests take turns the same way (`crates/ui-egui/tests/view.rs`). Hold it for the whole
+    /// tests take turns the same way (`crates/ui-egui/tests/it/main.rs`). Hold it for the whole
     /// test (declared before the instance, so it's released after the device is dropped).
     static GPU: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -857,7 +973,7 @@ mod tests {
     }
 
     #[test]
-    fn gpu_backends_avoid_vulkan_on_windows_and_prefer_low_power() {
+    fn gpu_setup_avoids_vulkan_and_stretched_resizes_on_windows_and_prefers_low_power() {
         let mut native = eframe::NativeOptions::default();
         super::configure_gpu(&mut native);
         let eframe::egui_wgpu::WgpuSetup::CreateNew(setup) = &native.wgpu_options.wgpu_setup else {
@@ -874,6 +990,18 @@ mod tests {
             let backends = setup.instance_descriptor.backends;
             assert!(backends.contains(eframe::wgpu::Backends::DX12), "{backends:?}");
             assert!(!backends.contains(eframe::wgpu::Backends::VULKAN), "issue #37: {backends:?}");
+        }
+        use eframe::wgpu::Dx12SwapchainKind::{DxgiFromHwnd, DxgiFromVisual};
+        assert_eq!(super::dx12_presentation(None), DxgiFromVisual);
+        assert_eq!(super::dx12_presentation(Some(DxgiFromHwnd)), DxgiFromHwnd, "WGPU_DX12_PRESENTATION_SYSTEM still decides");
+        assert_eq!(super::dx12_presentation(Some(DxgiFromVisual)), DxgiFromVisual);
+        let presentation = setup.instance_descriptor.backend_options.dx12.presentation_system;
+        if cfg!(target_os = "windows") {
+            // A composition visual unless WGPU_DX12_PRESENTATION_SYSTEM asks otherwise.
+            let asked = eframe::wgpu::Dx12SwapchainKind::from_env();
+            assert_eq!(presentation, asked.unwrap_or(DxgiFromVisual), "issue #2738: resizing stretches a window swap chain");
+        } else {
+            assert_eq!(presentation, eframe::wgpu::Dx12SwapchainKind::default().with_env(), "only Windows changes it");
         }
     }
 
@@ -893,14 +1021,49 @@ mod tests {
     fn surface_limits_preserve_other_requirements_and_never_overrequest() {
         for required in [eframe::wgpu::Limits::default(), eframe::wgpu::Limits::downlevel_webgl2_defaults()] {
             for extent in [4096, 8192, 16384] {
-                let supported = eframe::wgpu::Limits { max_texture_dimension_2d: extent, ..required.clone() };
+                let supported = eframe::wgpu::Limits {
+                    max_texture_dimension_2d: extent,
+                    max_bind_groups: 8,
+                    min_uniform_buffer_offset_alignment: 128,
+                    min_storage_buffer_offset_alignment: 128,
+                    ..required.clone()
+                };
                 let enabled = super::surface_texture_limits(required.clone(), &supported);
                 let mut expected = required.clone();
                 expected.max_texture_dimension_2d = extent;
                 assert_eq!(enabled, expected);
                 assert_eq!(enabled.max_texture_dimension_2d, supported.max_texture_dimension_2d);
+                assert!(enabled.check_limits(&supported));
             }
         }
+    }
+
+    #[test]
+    fn surface_limits_fit_v3d_shader_variable_limit() {
+        // Issue #2383: V3D supports 15 variables, below the default request of 16.
+        let required = eframe::wgpu::Limits::default();
+        let supported = eframe::wgpu::Limits { max_texture_dimension_2d: 7680, max_inter_stage_shader_variables: 15, ..required.clone() };
+        let enabled = super::surface_texture_limits(required.clone(), &supported);
+        assert!(enabled.check_limits(&supported), "unsupported device limits: {enabled:?}");
+        let expected = eframe::wgpu::Limits { max_texture_dimension_2d: 7680, max_inter_stage_shader_variables: 15, ..required };
+        assert_eq!(enabled, expected);
+    }
+
+    #[test]
+    fn surface_limits_fit_downlevel_maxima_and_minimum_alignments() {
+        let required = eframe::wgpu::Limits::downlevel_webgl2_defaults();
+        let supported = eframe::wgpu::Limits {
+            max_texture_dimension_2d: 2048,
+            max_bind_groups: 2,
+            max_vertex_attributes: 8,
+            min_uniform_buffer_offset_alignment: 512,
+            min_storage_buffer_offset_alignment: 512,
+            ..required.clone()
+        };
+        let enabled = super::surface_texture_limits(required, &supported);
+        assert!(enabled.check_limits(&supported), "unsupported device limits: {enabled:?}");
+        // Larger minimum alignments are weaker capabilities, unlike maximum limits.
+        assert_eq!(enabled, supported);
     }
 
     #[test]
@@ -955,28 +1118,19 @@ mod tests {
         }
     }
 
+    /// Regression test: the lockfile resolves egui-wgpu 0.37.0 through an allowed source, the root manifest
+    /// does not path-patch the vendor copy, and that copy stays as provenance for the surface-fit patch.
     #[test]
-    fn egui_wgpu_carries_the_surface_size_fit() {
-        // Issue #577: egui-wgpu 0.36.2 configures a window's surface at the window's size, and
+    fn vendor_provenance_egui_wgpu_surface_fit_identity() {
+        // Issue #577: egui-wgpu configured a window's surface at the window's size, and
         // `Surface::configure` panics when that's beyond the device's `max_texture_dimension_2d`
-        // (emilk/egui#8361). vendor/egui-wgpu fits it within the limit. A dependency bump that
-        // resolves egui-wgpu from crates.io again, or a re-vendored copy without the patch, would
-        // bring the crash back: re-apply the patch, or drop the copy once an egui release has a
-        // fix (vendor/README.md).
+        // (emilk/egui#8361). The reviewed egui 0.37 worktree carries E2 (`surface_fit`); the
+        // behavioural test above exercises it. The old 0.36 vendor copy is retained for
+        // provenance only and is no longer a published path patch, so reading it would not prove
+        // what the app runs.
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let lock = std::fs::read_to_string(root.join("Cargo.lock")).unwrap();
-        let egui_wgpu = lock.split("[[package]]").find(|p| p.contains("\nname = \"egui-wgpu\"\n")).expect("egui-wgpu is in Cargo.lock");
-        assert!(!egui_wgpu.contains("\nsource = "), "egui-wgpu must resolve to vendor/egui-wgpu, not:{egui_wgpu}");
-        // `surface_fit` is tested above; these keep it in the paths that size a surface.
-        let painter = std::fs::read_to_string(root.join("vendor/egui-wgpu/src/winit.rs")).unwrap().replace("\r\n", "\n");
-        for patch in [
-            "let (width, height, render_scale) = surface_fit(window_width, window_height, max_side);",
-            "let (fit_width, fit_height, _) = surface_fit(width, height, self.max_surface_side());",
-            "pixels_per_point: pixels_per_point * surface_state.render_scale,",
-            "old_state.window_width,\n            old_state.window_height,",
-        ] {
-            assert!(painter.contains(patch), "vendor/egui-wgpu lost its surface size patch: {patch}");
-        }
+        assert_window_stack_graph(&root, "egui-wgpu", "0.37.0");
+        assert!(root.join("vendor/egui-wgpu/src/winit.rs").exists(), "the vendor copy and its provenance stay until the fork revision is pinned");
     }
 
     #[test]
@@ -1032,24 +1186,20 @@ mod tests {
         assert!(matches!(caught, Err(wgpu::Error::Validation { .. })), "outer: {caught:?}");
     }
 
+    /// Regression test: the lockfile resolves egui-wgpu 0.37.0 through an allowed source, the root manifest
+    /// does not path-patch the vendor copy, and that copy stays as provenance for the catch-errors patch.
     #[test]
-    fn egui_wgpu_returns_a_surface_it_cannot_configure_as_an_error() {
-        // Issue #519: `catch_errors` is tested above; this keeps it around the first configure of
-        // every new window's surface, and its error reaching eframe as `WgpuError` (eframe then
-        // returns `Error::Wgpu`, which `main` retries with OpenGL). Without it a failed configure
-        // panics before the app is created, and the OpenGL retry never runs.
+    fn vendor_provenance_egui_wgpu_catch_errors_identity() {
+        // Issue #519: E3 (`catch_errors`) is tested above against a real device. The reviewed 0.37
+        // worktree carries it around the first configure of every new window's surface, and its
+        // error reaches eframe as `WgpuError` (eframe then returns `Error::Wgpu`, which `main`
+        // retries with OpenGL). Without it a failed configure panics before the app is created.
+        // `catch_errors` is exercised against a real device in the test above and below; the
+        // graph check makes sure the app runs the reviewed 0.37 worktree (the retained vendor
+        // copy is not read as proof of behaviour).
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let lock = std::fs::read_to_string(root.join("Cargo.lock")).unwrap();
-        let egui_wgpu = lock.split("[[package]]").find(|p| p.contains("\nname = \"egui-wgpu\"\n")).expect("egui-wgpu is in Cargo.lock");
-        assert!(!egui_wgpu.contains("\nsource = "), "egui-wgpu must resolve to vendor/egui-wgpu, not:{egui_wgpu}");
-        let painter = std::fs::read_to_string(root.join("vendor/egui-wgpu/src/winit.rs")).unwrap().replace("\r\n", "\n");
-        let add_surface = painter.split("async fn add_surface(").nth(1).and_then(|s| s.split("\n    fn ").next()).expect("add_surface");
-        for patch in [
-            "let installed = catch_errors(&device, || {\n            self.install_surface(surface, viewport_id, size.width, size.height, false);\n        })",
-            "return Err(crate::WgpuError::ConfigureSurface(error));",
-        ] {
-            assert!(add_surface.contains(patch), "vendor/egui-wgpu lost its surface configure patch: {patch}");
-        }
+        assert_window_stack_graph(&root, "egui-wgpu", "0.37.0");
+        assert!(root.join("vendor/egui-wgpu/src/winit.rs").exists(), "the vendor copy and its provenance stay until the fork revision is pinned");
     }
 
     #[test]
@@ -1083,6 +1233,8 @@ mod tests {
         }
     }
 
+    /// Regression test: winit resolves to 0.30.13 without a published vendor path patch, the retained copy
+    /// still carries the W1 Windows 11 monitor-scale fix, and its upstream base is recorded.
     #[test]
     fn winit_carries_the_windows_11_monitor_scale_fix() {
         // Issue #324: winit 0.30.13 as released nudges a window dragged onto a monitor with another
@@ -1091,13 +1243,23 @@ mod tests {
         // dependency bump that resolves winit from crates.io again, or a re-vendored copy without
         // the patch, would silently bring the bug back: re-apply the patch, or drop the copy once a
         // winit 0.30 release has the fix (vendor/README.md).
+        // W1 (and W2–W13) were audited against the reviewed winit worktree: the vendor rows in
+        // `vendor/README.md` match the fork's PATCHES.md entries W1–W13. The vendor source is no
+        // longer a published path patch, so this checks the actual graph, not the old copy.
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let lock = std::fs::read_to_string(root.join("Cargo.lock")).unwrap();
-        let winit = lock.split("[[package]]").find(|p| p.contains("\nname = \"winit\"\n")).expect("winit is in Cargo.lock");
-        assert!(!winit.contains("\nsource = "), "winit must resolve to vendor/winit, not:{winit}");
-        let dpi_changed = std::fs::read_to_string(root.join("vendor/winit/src/platform_impl/windows/event_loop.rs")).unwrap();
-        let patch = "if !WIN10_BUILD_VERSION.is_some_and(|build| build < 22000) {\n                new_outer_rect = suggested_rect;";
-        assert!(dpi_changed.contains(patch), "vendor/winit lost its WM_DPICHANGED patch");
+        assert_window_stack_graph(&root, "winit", "0.30.13");
+        let event_loop = std::fs::read_to_string(root.join("vendor/winit/src/platform_impl/windows/event_loop.rs")).unwrap();
+        // The audited W1 hunk itself, not merely the file's presence: Windows 11 applies the
+        // rect Windows suggests, while Windows 10 keeps the old adjustment.
+        for marker in [
+            "PdfCraft patch: from Windows 11 (build 22000) on, apply the rect Windows suggests",
+            "if !WIN10_BUILD_VERSION.is_some_and(|build| build < 22000) {",
+            "new_outer_rect = suggested_rect;",
+        ] {
+            assert!(event_loop.contains(marker), "vendor/winit lost the W1 monitor-scale patch: {marker}");
+        }
+        let provenance = std::fs::read_to_string(root.join("vendor/winit/.cargo_vcs_info.json")).unwrap();
+        assert!(provenance.contains("e9809ef54b18499bb4f2cac945719ecc2a61061b"), "vendor/winit keeps its upstream base provenance");
     }
 
     const NVIDIA: (u32, u32) = (0x10de, 0x2684);
@@ -1330,5 +1492,27 @@ mod tests {
         let entry = include_str!("../../../packaging/linux/ai.storyteller.pdfcraft.desktop");
         let class = entry.lines().find_map(|line| line.strip_prefix("StartupWMClass="));
         assert_eq!(class, Some(super::APP_ID));
+    }
+
+    // Regression test for #246: `eprintln!` panics when standard error is a broken pipe (a GUI
+    // launch on Windows), and a panic inside the panic hook aborts the process. The start-up
+    // path and the hook must write to standard error without it.
+    #[test]
+    fn start_up_and_the_panic_hook_never_use_eprintln() {
+        let source = include_str!("main.rs");
+        // Everything before the top-level test module is product code.
+        let product = source.split("\n#[cfg(test)]\nmod tests {").next().unwrap_or(source);
+        assert!(product.len() < source.len(), "found the end of the product code");
+        let offenders: Vec<_> = product
+            .lines()
+            .enumerate()
+            .filter(|(_, line)| !line.trim_start().starts_with("//") && line.contains("eprintln!"))
+            .map(|(n, line)| format!("main.rs:{}: {}", n + 1, line.trim()))
+            .collect();
+        assert!(
+            offenders.is_empty(),
+            "`eprintln!` panics on a broken standard error pipe; use `log::warn!` or `write_fmt` on `stderr()` and ignore the error:\n{}",
+            offenders.join("\n")
+        );
     }
 }

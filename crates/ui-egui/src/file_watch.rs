@@ -55,6 +55,19 @@ impl Stamp {
         Self { len: meta.len(), modified: meta.modified().ok(), extra }
     }
 
+    /// Only Unix change-time differs: metadata may have changed without a content edit.
+    fn metadata_only_candidate(self, other: Self) -> bool {
+        #[cfg(unix)]
+        {
+            self.len == other.len && self.modified == other.modified && self.extra.get(..2) == other.extra.get(..2)
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = other;
+            false
+        }
+    }
+
     /// The file at `path` now; `None` when it is missing, not a file or can't be read.
     pub fn at(path: &str) -> Option<Self> {
         std::fs::metadata(path).ok().filter(Metadata::is_file).map(|m| Self::of(&m))
@@ -158,6 +171,24 @@ impl Watcher {
     }
 }
 
+/// Verify a metadata-only candidate without allocating a second PDF. The stamp must stay
+/// fixed throughout; changed bytes, a replacement or any read failure still count as a change.
+fn contents_match(path: &str, stamp: Stamp, expected: &[u8]) -> bool {
+    let Ok(mut file) = File::open(path) else { return false };
+    if !file.metadata().is_ok_and(|m| Stamp::of(&m) == stamp) {
+        return false;
+    }
+    let mut buffer = [0u8; 8192];
+    for chunk in expected.chunks(buffer.len()) {
+        let Some(out) = buffer.get_mut(..chunk.len()) else { return false };
+        if file.read_exact(out).is_err() || out != chunk {
+            return false;
+        }
+    }
+    let mut tail = [0];
+    matches!(file.read(&mut tail), Ok(0)) && file.metadata().is_ok_and(|m| Stamp::of(&m) == stamp) && Stamp::at(path) == Some(stamp)
+}
+
 /// What a changed file turned out to be.
 enum Version {
     /// A whole PDF, read.
@@ -247,6 +278,10 @@ pub struct FileWatch {
     inline: Watcher,
     /// The version of each document's file that PdfCraft last read or wrote.
     known: HashMap<DocId, Stamp>,
+    /// The version each document came from (its open, reload or last save). Unlike `known`,
+    /// a version found on disk and not applied (the document had unsaved changes) is not
+    /// recorded here, so Save can tell that the file is not the one the document came from.
+    basis: HashMap<DocId, Stamp>,
     /// How many times PdfCraft has read or written each document's file: a version the watcher
     /// found before the latest one is older than the document in memory, and is not applied
     /// (#1802).
@@ -259,18 +294,29 @@ impl FileWatch {
     /// PdfCraft read or wrote `path` for `doc`: that version is not a change, and anything the
     /// watcher found before it is stale.
     pub fn known_now(&mut self, doc: DocId, path: &str) {
-        if let Some(stamp) = Stamp::at(path) {
-            self.known.insert(doc, stamp);
-        }
-        self.bump(doc);
+        self.known_as(doc, Stamp::at(path));
     }
 
     /// Remember `stamp`, read before the file was, for `doc`.
     pub fn known_as(&mut self, doc: DocId, stamp: Option<Stamp>) {
         if let Some(stamp) = stamp {
             self.known.insert(doc, stamp);
+            self.basis.insert(doc, stamp);
         }
         self.bump(doc);
+    }
+
+    /// Whether the file at `path` is another version than the one `doc` came from: something
+    /// else wrote it since the document was opened, reloaded or last saved (#2166). A file
+    /// that is missing or can't be looked at, or a document whose version was never recorded,
+    /// is not a difference.
+    pub fn disk_differs(&self, doc: DocId, path: &str, saved: Option<Arc<Vec<u8>>>) -> bool {
+        match (Stamp::at(path), self.basis.get(&doc)) {
+            (Some(now), Some(basis)) => {
+                now != *basis && !(now.metadata_only_candidate(*basis) && saved.is_some_and(|bytes| contents_match(path, now, &bytes)))
+            }
+            _ => false,
+        }
     }
 
     fn bump(&mut self, doc: DocId) {
@@ -307,6 +353,7 @@ impl PdfCraftApp {
             let list: Vec<Watched> = self.watched().map(|(doc, path, known, epoch)| Watched { doc, path: path.to_owned(), known, epoch }).collect();
             let open: Vec<DocId> = self.views.iter().map(|v| v.id).collect();
             self.watch.known.retain(|doc, _| open.contains(doc));
+            self.watch.basis.retain(|doc, _| open.contains(doc));
             self.watch.epoch.retain(|doc, _| open.contains(doc));
             if self.send_to_watcher(list.clone()) {
                 self.watch.sent = list;
@@ -362,6 +409,12 @@ impl PdfCraftApp {
         }
         // PdfCraft wrote this version itself (a save), or it was handled already.
         if self.watch.known.get(&c.doc) == Some(&c.stamp) {
+            return;
+        }
+        // LaunchServices recovery (and Finder metadata edits) changes ctime. The worker
+        // already read the stable file: identical saved bytes are not a document change.
+        if self.session.get(c.doc).is_some_and(|d| d.saved_bytes().as_slice() == c.bytes.as_slice()) {
+            self.watch.known_as(c.doc, Some(c.stamp));
             return;
         }
         self.watch.known.insert(c.doc, c.stamp);
@@ -503,6 +556,58 @@ mod tests {
         app.session.get(app.views[0].id).unwrap()
     }
 
+    /// Association recovery changes ctime without replacing PDF contents. It must neither
+    /// discard undo history nor make the next Save ask to overwrite our own metadata change.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn association_metadata_does_not_reload_or_block_save() {
+        let (_dir, path) = TempDir::new("association-metadata", &fixture(2));
+        let mut h = harness(&path);
+        let app = h.state_mut();
+        app.views[0].select_pages(&[0]);
+        app.apply_edit(pdfcraft_engine::Edit::RotatePages { pages: vec![0], degrees: 90 });
+        xattr::set(&path, "com.apple.quarantine", b"2082;1234;Preview;").unwrap();
+        // Exercise Save before the worker has consumed the metadata change.
+        assert!(h.state_mut().save_active(SaveTarget::InPlace), "ctime alone must not cause an overwrite prompt");
+        xattr::set(&path, "com.apple.quarantine", b"2082;5678;Preview;").unwrap();
+        h.run_steps(4);
+        assert!(doc(&h).can_undo().is_some(), "metadata-only events must not reload and clear history");
+        assert!(!h.state().views[0].disk_changed);
+    }
+
+    /// The repair parser's 64 KiB cap must not override the shared writer's larger limit.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_large_binding_does_not_block_a_document_save() {
+        let (_dir, path) = TempDir::new("large-binding-save", &fixture(2));
+        xattr::set(&path, "com.apple.LaunchServices.OpenWith", &vec![b'x'; 65537]).unwrap();
+        xattr::set(&path, "com.apple.quarantine", b"0082;1234;Preview;").unwrap();
+        let mut h = harness(&path);
+        let app = h.state_mut();
+        app.views[0].select_pages(&[0]);
+        app.apply_edit(pdfcraft_engine::Edit::RotatePages { pages: vec![0], degrees: 90 });
+        assert!(app.save_active(SaveTarget::InPlace), "the document save uses upstream preservation limits");
+        assert_eq!(xattr::get(&path, "com.apple.LaunchServices.OpenWith").unwrap().unwrap().len(), 65537);
+        assert_eq!(xattr::get(&path, "com.apple.quarantine").unwrap(), Some(b"0082;1234;Preview;".to_vec()));
+    }
+
+    /// Retaining mtime and length must not hide an actual external edit behind metadata noise.
+    #[cfg(unix)]
+    #[test]
+    fn same_length_and_mtime_content_edits_still_require_overwrite_confirmation() {
+        let (_dir, path) = TempDir::new("ctime-content", &fixture(2));
+        let mut h = harness(&path);
+        let old = std::fs::metadata(&path).unwrap().modified().unwrap();
+        let changed = String::from_utf8(fixture(2)).unwrap().replace("200 300", "201 300");
+        std::fs::write(&path, changed).unwrap();
+        std::fs::File::options().write(true).open(&path).unwrap().set_modified(old).unwrap();
+        let app = h.state_mut();
+        app.views[0].select_pages(&[0]);
+        app.apply_edit(pdfcraft_engine::Edit::RotatePages { pages: vec![0], degrees: 90 });
+        assert!(!app.save_active(SaveTarget::InPlace));
+        assert!(matches!(app.dialog, Some(crate::Dialog::OverwriteChanged)));
+    }
+
     /// #1802: the watcher found version B of the file, then the user saved version C over it
     /// before B was applied. B is older than the document now: it is not applied, the undo history
     /// stays, and C stays on disk.
@@ -514,7 +619,12 @@ mod tests {
         let app = h.state_mut();
         app.views[0].select_pages(&[0]);
         app.apply_edit(pdfcraft_engine::Edit::RotatePages { pages: vec![0], degrees: 90 });
-        assert!(app.save_active(SaveTarget::InPlace), "saved version C");
+        // B is on disk, not the A the document came from: Save asks first (#2166), and the
+        // user saves C over it.
+        assert!(!app.save_active(SaveTarget::InPlace), "asks before writing over B");
+        app.overwrite_changed_file();
+        assert!(!doc(&h).dirty, "saved version C");
+        let app = h.state_mut();
         app.watch.found.lock().unwrap().extend(stale);
         h.run_steps(3);
         let d = doc(&h);

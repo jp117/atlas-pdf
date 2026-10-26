@@ -24,42 +24,54 @@ pub mod compare;
 mod copy_image;
 pub mod dates;
 pub mod export;
+pub mod field_table;
 pub mod js;
 pub mod links;
 pub mod ocr;
 pub mod optimizer;
+pub mod print_raster;
 pub mod printcheck;
 mod scan_colours;
+mod scan_fields;
 pub mod signature_image;
 pub mod signature_scan;
+mod stamp_preview;
 pub mod text_fonts;
 mod text_preview;
-mod upright_image;
+pub mod word_count;
 pub mod xfa;
 
 pub use signature_image::{ImageSignaturePreview, SignatureImage};
 pub use signature_scan::{PhotoRect, ScanError, SignaturePhoto, Turn};
+pub use stamp_preview::StampPreview;
 pub use text_preview::TextEditPreview;
 
-pub use pdfcraft_organize::{BoxSpec, FieldConflicts, PageBox, SplitBy, split_ranges};
+pub use pdfcraft_organize::{BoxSpec, FieldConflicts, PageBox, SplitBy, Transition, TransitionSpec, mime_for_name, split_ranges};
 
 /// One file produced by a split: (1-based first page, last page, PDF bytes).
 pub use pdfcraft_organize::LabelStyle;
+pub use pdfcraft_organize::Standard;
+pub use pdfcraft_organize::check_custom_key;
 pub use pdfcraft_organize::view::{InitialView, Layout as InitialLayout, Magnification, Navigation};
 
 pub use pdfcraft_cos::Algorithm;
 pub use pdfcraft_create::{CONVERTIBLE, CreateError, ImageResolution, SourceKind, decode_text, source_kind};
+pub use pdfcraft_edit::added::{
+    CHAR_SPACING_LIMIT as ADDED_CHAR_SPACING_LIMIT, paste_place as added_paste_place, paste_rect as added_paste_rect, text_rect as added_text_rect,
+    text_width as added_text_width,
+};
 pub use pdfcraft_edit::{
     Added, AddedImage, AddedText, Align as TextAlign, Background, Content as AddedContent, Family as FontFamily, HeaderFooter, MarkKind, Watermark,
 };
 pub use pdfcraft_forms::{
-    BorderStyle, CheckStyle, Field as FormField, FieldAction, FieldChange, FieldFont, FieldKind as FormFieldKind, FieldProps, FieldValue,
-    Look as FieldLook, LookPatch as FieldLookPatch, NewField, TabOrder, Trigger as FieldTrigger, Widget as FormWidget, af as form_scripts,
-    flags as field_flags,
+    BorderStyle, CalculatedField, CalculationIssue, CalculationOrder, CheckStyle, Field as FormField, FieldAction, FieldChange, FieldFont,
+    FieldKind as FormFieldKind, FieldProps, FieldValue, Look as FieldLook, LookPatch as FieldLookPatch, NewField, TabOrder, Trigger as FieldTrigger,
+    Widget as FormWidget, af as form_scripts, appearance as form_appearance, appearance::auto_text_size_by as field_auto_text_size_by,
+    calculations_changed as form_calculations_changed, flags as field_flags,
 };
 
 pub use pdfcraft_a11y as a11y;
-pub use pdfcraft_edit::{BlockStyle, PageImage, RangeStyle, TextBlock, TextLine, first_undrawable};
+pub use pdfcraft_edit::{BlockKey, BlockStyle, PageImage, RangeStyle, TextBlock, TextLine, block_overlapping, first_undrawable};
 pub use pdfcraft_measure as measure;
 pub use pdfcraft_xfa::Report as XfaLayout;
 
@@ -72,9 +84,13 @@ pub enum ImageEdit {
     Move([f64; 4]),
     /// Quarter turns clockwise about its centre.
     Rotate(i32),
+    /// Any angle in degrees clockwise about its centre (the unit is degrees, not quarter turns).
+    RotateBy(f64),
     Flip {
         horizontal: bool,
     },
+    /// Show only this box of it (user space), the pixels staying where they are.
+    Crop([f64; 4]),
     /// Draw this image file (PNG, JPEG, TIFF, GIF, BMP, JPEG 2000) in its place.
     Replace {
         name: String,
@@ -82,7 +98,7 @@ pub enum ImageEdit {
     },
     Delete,
 }
-pub use pdfcraft_fonts::{MAX_SIGNATURE_CHARS, ScriptOutline, script_missing, script_outline};
+pub use pdfcraft_fonts::{MAX_SIGNATURE_CHARS, ScriptOutline, script_missing, script_outline, undrawable_message};
 
 /// Fill & Sign: `text` in the script font as a typed signature, its left edge at `at` (user
 /// space, vertically centred) and `height` points tall. `None` for text with no outlines.
@@ -107,6 +123,19 @@ pub fn typed_signature_shape(at: [f64; 2], text: &str, height: f64, rotation: i6
     let contours = o.contours.iter().map(|c| c.iter().map(|p| to_user((p[0] - left) / width, (p[1] - bottom) / span)).collect()).collect();
     Some(Shape::TypedSignature { rect, contours })
 }
+/// `at` moved `right` and `up` points as displayed on a page turned by `rotation` (its `/Rotate`).
+pub fn displayed_offset(rotation: i64, at: [f64; 2], right: f64, up: f64) -> [f64; 2] {
+    let [a, b, c, d, ..] = pdfcraft_model::view_matrix_for(rotation, [0.0; 4]);
+    [at[0] + a * right + c * up, at[1] + b * right + d * up]
+}
+
+/// The user-space box `width` x `height` points as displayed on a page turned by `rotation`,
+/// with its displayed top-left corner at `at`: where typed text and text boxes go. `None` for a
+/// non-finite point.
+pub fn text_box_at(rotation: i64, at: [f64; 2], width: f64, height: f64) -> Option<[f64; 4]> {
+    signature_image::upright_box(rotation, displayed_offset(rotation, at, 0.0, -height / 2.0), width, height)
+}
+
 /// `text` in the script font as the graphic of a visible digital signature, as Fill & Sign types
 /// it. `None` for text with no outlines.
 pub fn typed_signature_graphic(text: &str) -> Option<pdfcraft_sign::Graphic> {
@@ -147,7 +176,55 @@ pub fn merge_data_files(files: &[(String, Vec<u8>)]) -> Result<String, String> {
 
 pub type SplitPart = (usize, usize, Arc<Vec<u8>>);
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
+
+#[cfg(test)]
+thread_local! {
+    static SECONDARY_SCAN_COUNTS: std::cell::Cell<(usize, usize)> = const { std::cell::Cell::new((0, 0)) };
+    static REFRESH_PANICS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn panic_on_refresh(count: usize) {
+    REFRESH_PANICS.with(|n| n.set(count));
+}
+
+#[cfg(test)]
+fn check_refresh_panic() {
+    REFRESH_PANICS.with(|n| {
+        let rem = n.get();
+        if rem > 0 {
+            n.set(rem - 1);
+            panic!("injected refresh panic");
+        }
+    });
+}
+
+#[cfg(test)]
+fn reset_secondary_scan_counts() {
+    SECONDARY_SCAN_COUNTS.with(|counts| counts.set((0, 0)));
+}
+
+#[cfg(test)]
+fn secondary_scan_counts() -> (usize, usize) {
+    SECONDARY_SCAN_COUNTS.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+fn record_marker_scan() {
+    SECONDARY_SCAN_COUNTS.with(|counts| {
+        let (markers, links) = counts.get();
+        counts.set((markers + 1, links));
+    });
+}
+
+#[cfg(test)]
+fn record_link_scan() {
+    SECONDARY_SCAN_COUNTS.with(|counts| {
+        let (markers, links) = counts.get();
+        counts.set((markers, links + 1));
+    });
+}
 
 use pdfcraft_cos::{SaveOptions, write_full, write_incremental};
 use pdfcraft_render::{DocInfo, Layer, LayerOp, OpenError, ReadingColors, RenderConfig, RenderPool, inspect};
@@ -158,6 +235,10 @@ pub struct DocId(pub u64);
 
 /// Undo/redo depth. Snapshots share unchanged data, so this is memory-cheap.
 const MAX_UNDO: usize = 100;
+
+/// The highest resolution a document that allows only low-resolution printing (Table 22, bit 12
+/// clear) is printed at.
+const LOW_RESOLUTION_PRINT_DPI: f64 = 150.0;
 
 /// The passwords that go with one state of a document (protection can change them).
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -179,6 +260,8 @@ enum Scope {
     Comments,
     /// Only form field values (and their widget appearances).
     Form,
+    /// Link annotations; the full inspection is refreshed, but page-content indexes stay valid.
+    Links,
     /// Only page content streams, resources and added content/marks: the page tree,
     /// annotations, form fields, links, outline and fonts are unchanged, so the full
     /// re-inspection is skipped (seconds on very large files).
@@ -188,7 +271,7 @@ enum Scope {
 /// Edits during which field scripts run.
 fn uses_scripts(edit: &Edit) -> bool {
     match edit {
-        Edit::SetFieldValue { .. } | Edit::ApplyScriptChanges { .. } | Edit::SetFieldScript { .. } => true,
+        Edit::SetFieldValue { .. } | Edit::ApplyScriptChanges { .. } | Edit::SetFieldScript { .. } | Edit::SetCalculationOrder { .. } => true,
         Edit::Batch { edits, .. } => edits.iter().any(uses_scripts),
         _ => false,
     }
@@ -197,6 +280,8 @@ fn uses_scripts(edit: &Edit) -> bool {
 fn scope_of(edit: &Edit) -> Scope {
     match edit {
         Edit::SetInfo { .. } => Scope::Metadata,
+        // The Attachments list is read from the whole document.
+        Edit::AddAttachment { .. } | Edit::DeleteAttachment { .. } => Scope::Full,
         // A file attachment also changes the Attachments list.
         Edit::AddAnnotation(a) if matches!(a.shape, Shape::Attachment { .. }) => Scope::Full,
         Edit::AddMeasurement(_)
@@ -213,10 +298,13 @@ fn scope_of(edit: &Edit) -> Scope {
         | Edit::ReplaceText { .. }
         | Edit::EraseInk { .. }
         | Edit::MoveAnnotation { .. }
+        | Edit::ReshapeAnnotation { .. }
         | Edit::ResizeAnnotation { .. }
         | Edit::StyleAnnotation { .. }
         | Edit::FillAnnotation { .. }
+        | Edit::FontSizeAnnotation { .. }
         | Edit::SetAnnotationInfo { .. } => Scope::Comments,
+        Edit::AddLink { .. } | Edit::SetLink { .. } | Edit::DeleteLink { .. } | Edit::RemoveLinks { .. } | Edit::AddLinks { .. } => Scope::Links,
         Edit::SetFieldValue { .. } | Edit::ResetForm { .. } | Edit::SetFieldImage { .. } | Edit::ApplyScriptChanges { .. } => Scope::Form,
         // Page content, resources and added content/marks only: the page tree, annotations,
         // fields, links and document metadata are untouched (see `refresh_content`).
@@ -229,6 +317,7 @@ fn scope_of(edit: &Edit) -> Scope {
         | Edit::UpdateContent { .. }
         | Edit::DeleteContent { .. }
         | Edit::ReplaceImage { .. }
+        | Edit::PasteContent { .. }
         | Edit::AddHeaderFooter { .. }
         | Edit::AddWatermark { .. }
         | Edit::AddBackground { .. }
@@ -249,6 +338,15 @@ type Snapshot = (Label, pdfcraft_cos::Document, Keys, Scope);
 #[derive(Clone)]
 struct Editor {
     cos: pdfcraft_cos::Document,
+    /// The file as last opened or saved. Incremental saves append to it, and Revert opens it.
+    /// Undo may restore a snapshot whose own base is an earlier revision; this does not follow it.
+    saved: Arc<Vec<u8>>,
+    /// Passwords that open [`Self::saved`].
+    saved_keys: Keys,
+    /// [`Self::saved`] was never written where the document belongs: a new document (combine,
+    /// extract, create) or one restored from recovery. It stays unsaved until a save, whatever
+    /// undo brings back, or closing it would lose the whole document without asking.
+    unsaved_file: bool,
     undo: Vec<Snapshot>,
     redo: Vec<Snapshot>,
     keys: Keys,
@@ -256,19 +354,23 @@ struct Editor {
     /// runs (content edits leave every annotation dictionary alone). Cleared on any refresh
     /// that may change annotations; see [`AppearanceCache`].
     appearances: AppearanceCache,
+    /// Display appearances drawn for form fields the file leaves to the viewer (#3470), reused
+    /// for each widget while the objects it was drawn from are unchanged; see
+    /// [`pdfcraft_forms::FieldAppearanceCache`].
+    field_appearances: pdfcraft_forms::FieldAppearanceCache,
     /// The text blocks last computed for one page, reused while the document is unchanged.
     text_blocks: TextBlocksCache,
 }
 
-/// One page's text blocks ([`pdfcraft_edit::text_blocks`]) and the unmodified document state they
-/// were read from. Opening a paragraph and applying its edit both need them, and grouping a long
-/// page is not cheap. Only an unmodified document is cached: its identity changes on every edit,
-/// undo and save (each reopens the working file), so a stale entry never matches.
+/// One page's text blocks ([`pdfcraft_edit::text_blocks`]) and the document state they were read
+/// from. Opening a paragraph and applying its edit both need them, and grouping a long page is not
+/// cheap. The state ([`pdfcraft_cos::ReadState`]) changes with every edit and save and returns
+/// with undo, so a stale entry never matches, also after the document has been edited.
 #[derive(Default)]
 struct TextBlocksCache(std::sync::Mutex<Option<CachedTextBlocks>>);
 
 /// The document state, the page (0-based) and its text blocks.
-type CachedTextBlocks = (pdfcraft_cos::SourceIdentity, usize, Arc<Vec<pdfcraft_edit::TextBlock>>);
+type CachedTextBlocks = (pdfcraft_cos::ReadState, usize, Arc<Vec<pdfcraft_edit::TextBlock>>);
 
 impl Clone for TextBlocksCache {
     fn clone(&self) -> Self {
@@ -280,20 +382,16 @@ impl Clone for TextBlocksCache {
 impl Editor {
     /// The text blocks on `page` (0-based), from the cache when the document hasn't changed.
     fn text_blocks(&self, page: usize) -> Result<Arc<Vec<pdfcraft_edit::TextBlock>>, EditError> {
-        let source = (!self.cos.is_modified()).then(|| self.cos.source_identity());
-        if let Some(source) = &source
-            && let Ok(cache) = self.text_blocks.0.lock()
-            && let Some((s, p, blocks)) = cache.as_ref()
-            && s == source
+        if let Ok(cache) = self.text_blocks.0.lock()
+            && let Some((state, p, blocks)) = cache.as_ref()
             && *p == page
+            && state.matches(&self.cos)
         {
             return Ok(blocks.clone());
         }
         let blocks = Arc::new(pdfcraft_edit::text_blocks(&self.cos, page)?);
-        if let Some(source) = source
-            && let Ok(mut cache) = self.text_blocks.0.lock()
-        {
-            *cache = Some((source, page, blocks.clone()));
+        if let Ok(mut cache) = self.text_blocks.0.lock() {
+            *cache = Some((self.cos.read_state(), page, blocks.clone()));
         }
         Ok(blocks)
     }
@@ -322,12 +420,8 @@ pub struct Document {
     pub read_only_reason: Option<String>,
     /// Interactive form fields of the current state (empty without a form).
     pub form: Arc<Vec<pdfcraft_forms::Field>>,
-    /// Page marks present (headers and footers, watermarks, backgrounds), for Update/Remove.
-    pub marks: Vec<MarkKind>,
-    /// Text and images added with Edit a PDF ▸ Add content (still editable).
-    pub added: Vec<pdfcraft_edit::Added>,
-    /// Link annotations, for Edit a PDF ▸ Link.
-    pub links: Vec<pdfcraft_annot::links::LinkItem>,
+    marker_scan: OnceLock<pdfcraft_edit::MarkerScan>,
+    links: OnceLock<Vec<pdfcraft_annot::links::LinkItem>>,
     /// Signature fields, validated against the session's trust store (Signatures panel).
     pub signatures: Arc<Vec<SignatureInfo>>,
     trust: Arc<TrustStore>,
@@ -537,6 +631,12 @@ impl Document {
         self.editor.as_ref().and_then(|e| pdfcraft_edit::text_lines(&e.cos, page).ok()).unwrap_or_default()
     }
 
+    /// The form's calculation order: its calculated fields in the order they calculate, what each
+    /// formula reads, what is wrong with the order, and the order Fix order writes.
+    pub fn calculation_order(&self) -> CalculationOrder {
+        self.editor.as_ref().map(|e| pdfcraft_forms::calculation_order(&e.cos, &self.form)).unwrap_or_default()
+    }
+
     /// Add alternate text: the figures, in document order.
     pub fn figures(&self) -> Vec<a11y::Figure> {
         self.editor.as_ref().map(|e| a11y::figures(&e.cos)).unwrap_or_default()
@@ -545,6 +645,11 @@ impl Document {
     /// Reachable indirect structure tags, in document order.
     pub fn tags(&self) -> Vec<a11y::TagInfo> {
         self.editor.as_ref().map(|e| a11y::tags(&e.cos)).unwrap_or_default()
+    }
+
+    /// Marked-content items directly owned by one reachable indirect structure tag.
+    pub fn tag_content(&self, object: pdfcraft_cos::ObjRef) -> Result<Vec<a11y::TagContentItem>, a11y::TagError> {
+        self.editor.as_ref().map(|e| a11y::tag_content(&e.cos, object)).unwrap_or_else(|| Ok(Vec::new()))
     }
 
     /// The edit that fixes `rule`, for the rules with an automatic fix: the document language
@@ -643,9 +748,68 @@ impl Document {
         self.info.annotations.iter().filter(|a| a.subtype == "Redact").count()
     }
 
+    /// Page marks present (headers and footers, watermarks, backgrounds), for Update/Remove.
+    pub fn marks(&self) -> &[MarkKind] {
+        &self
+            .marker_scan
+            .get_or_init(|| {
+                self.editor
+                    .as_ref()
+                    .map(|e| {
+                        #[cfg(test)]
+                        record_marker_scan();
+                        pdfcraft_edit::scan_markers(&e.cos)
+                    })
+                    .unwrap_or_default()
+            })
+            .marks
+    }
+
+    /// Text and images added with Edit a PDF ▸ Add content (still editable).
+    pub fn added(&self) -> &[pdfcraft_edit::Added] {
+        &self
+            .marker_scan
+            .get_or_init(|| {
+                self.editor
+                    .as_ref()
+                    .map(|e| {
+                        #[cfg(test)]
+                        record_marker_scan();
+                        pdfcraft_edit::scan_markers(&e.cos)
+                    })
+                    .unwrap_or_default()
+            })
+            .added
+    }
+
+    /// Link annotations, for Edit a PDF ▸ Link.
+    pub fn links(&self) -> &[pdfcraft_annot::links::LinkItem] {
+        self.links.get_or_init(|| {
+            self.editor
+                .as_ref()
+                .map(|e| {
+                    #[cfg(test)]
+                    record_link_scan();
+                    pdfcraft_annot::links::list(&e.cos)
+                })
+                .unwrap_or_default()
+        })
+    }
+
     /// Changes to content and document information are allowed.
     pub fn allows_modification(&self) -> bool {
         self.editable() && self.permissions().is_none_or(|p| p.modify())
+    }
+
+    /// How widget `widget` of text field `name` lays its value out, for asking whether a typed
+    /// value fits it ([`form_appearance::TextBox::fits`]): a field that doesn't scroll takes no
+    /// more than fits. `None` without such a field or widget, or when the document can't be
+    /// edited.
+    pub fn field_text_box(&self, name: &str, widget: usize) -> Option<form_appearance::TextBox> {
+        let cos = &self.editor.as_ref()?.cos;
+        let f = self.form.iter().find(|f| f.name == name)?;
+        let w = f.widgets.get(widget)?;
+        Some(form_appearance::text_box(cos, f, w))
     }
 
     /// Filling in form fields is allowed (Table 22, bits 6 and 9).
@@ -708,6 +872,14 @@ impl Document {
         matches!(f.kind, FormFieldKind::CheckBox | FormFieldKind::Radio).then(|| pdfcraft_forms::check_style(&e.cos, f))
     }
 
+    /// Whether text field `name`'s value is cut off by its box at the field's font size (#4018):
+    /// the page (0-based) of the first widget that cuts it, and how.
+    pub fn field_overflow(&self, name: &str) -> Option<(Option<usize>, pdfcraft_forms::appearance::Overflow)> {
+        let e = self.editor.as_ref()?;
+        let f = self.form.iter().find(|f| f.name == name)?;
+        f.widgets.iter().find_map(|w| pdfcraft_forms::appearance::value_overflow(&e.cos, f, w).map(|o| (w.page, o)))
+    }
+
     /// Remove Hidden Information: what each category would remove.
     pub fn hidden_info(&self) -> Vec<(Hidden, usize)> {
         self.editor.as_ref().map(|e| pdfcraft_redact::sanitize::scan(&e.cos)).unwrap_or_default()
@@ -731,6 +903,16 @@ impl Document {
         self.editor.as_ref().and_then(|e| pdfcraft_organize::info(&e.cos, key))
     }
 
+    /// Whether the document information has an entry `key`, of any type, listed or not.
+    pub fn has_info(&self, key: &str) -> bool {
+        self.editor.as_ref().is_some_and(|e| pdfcraft_organize::has_info(&e.cos, key))
+    }
+
+    /// The custom document properties as they are now (name, text), Document Properties ▸ Custom.
+    pub fn custom_info(&self) -> Vec<(String, String)> {
+        self.editor.as_ref().map(|e| pdfcraft_organize::custom_info(&e.cos)).unwrap_or_default()
+    }
+
     /// The name shown on the tab and window: the document title when the document asks for it
     /// (Initial View ▸ Show: Document Title) and has a real one, else the file name.
     pub fn display_name(&self) -> String {
@@ -750,9 +932,9 @@ impl Document {
     }
 
     /// The file as last opened or saved, without unsaved edits: what an incremental save appends
-    /// to.
+    /// to. This stays that file when undo has restored an older snapshot.
     pub fn saved_bytes(&self) -> Arc<Vec<u8>> {
-        self.editor.as_ref().map_or_else(|| self.bytes.clone(), |e| e.cos.bytes().clone())
+        self.editor.as_ref().map_or_else(|| self.bytes.clone(), |e| e.saved.clone())
     }
 
     /// Notes about damage repaired while opening (Document Properties ▸ Advanced, notices).
@@ -771,31 +953,101 @@ fn is_placeholder_title(title: &str) -> bool {
     address || t == "untitled"
 }
 
-/// What is displayed: the working file, plus (in memory only, never saved) the appearances
-/// PdfCraft draws for comments that have none ([`pdfcraft_annot::with_missing_appearances`]).
-/// The working file is unchanged, and so is everything that reads it (saving, signatures, …).
+/// The working file plus appearances for comments that have none, and for form fields the file
+/// leaves to the viewer (#3470). Signature artwork is preserved; validation badges belong to the
+/// viewer and never enter these bytes, which image/text exports and Print as Image also consume.
 fn display_bytes(editor: Option<&mut Editor>, bytes: &Arc<Vec<u8>>) -> Arc<Vec<u8>> {
-    let Some(display) = editor.and_then(|e| pdfcraft_annot::with_missing_appearances_cached(&e.cos, &mut e.appearances)) else {
+    let Some(e) = editor else { return bytes.clone() };
+    let comments = pdfcraft_annot::with_missing_appearances_cached(&e.cos, &mut e.appearances);
+    let fields = pdfcraft_forms::with_field_appearances_cached(comments.as_ref().unwrap_or(&e.cos), &mut e.field_appearances);
+    let Some(display) = fields.or(comments) else {
         return bytes.clone();
     };
-    // Writing fails only as saving the document would; the page then shows as it always did.
-    write_incremental(&display, &SaveOptions::default()).map(Arc::new).unwrap_or_else(|_| bytes.clone())
+    match write_incremental(&display, &SaveOptions::default()) {
+        Ok(written) => Arc::new(written),
+        Err(err) => {
+            e.cos.note_repair(format!("missing comment or field appearances could not be drawn ({err})"));
+            bytes.clone()
+        }
+    }
+}
+
+/// `comments` (the display copy with comment appearances, if it needed any; else the document
+/// itself) with its form fields drawn from their values where the file leaves that to the viewer.
+fn with_field_appearances(comments: Option<pdfcraft_cos::Document>, doc: &pdfcraft_cos::Document) -> Option<pdfcraft_cos::Document> {
+    pdfcraft_forms::with_field_appearances(comments.as_ref().unwrap_or(doc)).or(comments)
+}
+
+/// The reader shows the same pages in `a` and `b`: count, displayed size and rotation.
+fn same_pages(a: &[pdfcraft_render::PageInfo], b: &[pdfcraft_render::PageInfo]) -> bool {
+    a.len() == b.len()
+        && a.iter().zip(b).all(|(x, y)| (x.width - y.width).abs() < 0.01 && (x.height - y.height).abs() < 0.01 && x.rotation == y.rotation)
+}
+
+/// Each document-information field of `info` with its value in `cos` (`/Info`, else XMP), read
+/// the way the full inspection reads them: NULs and spaces trimmed, empty is none.
+fn info_fields<'a>(info: &'a mut DocInfo, cos: &pdfcraft_cos::Document) -> [(&'a mut Option<String>, Option<String>); 6] {
+    let read = |key| pdfcraft_organize::info(cos, key).map(|v| v.trim_matches('\0').trim().to_string()).filter(|v| !v.is_empty());
+    [
+        (&mut info.title, read("Title")),
+        (&mut info.author, read("Author")),
+        (&mut info.subject, read("Subject")),
+        (&mut info.keywords, read("Keywords")),
+        (&mut info.creator, read("Creator")),
+        (&mut info.producer, read("Producer")),
+    ]
+}
+
+/// The copy PDFCraft displays when opening `bytes`: with appearances drawn, in memory only, for
+/// comments that have none and form fields the file leaves to the viewer. Render paths outside the app, such as the CLI, use this so their page
+/// images agree with the app and independent viewers. It never changes the source document, and an
+/// unparseable file, a write failure or a parser panic falls back to the original bytes.
+pub fn display_bytes_for(bytes: Arc<Vec<u8>>, password: Option<&str>) -> Arc<Vec<u8>> {
+    guard(|| {
+        pdfcraft_cos::Document::open_with_password(bytes.clone(), password)
+            .ok()
+            .and_then(|cos| with_field_appearances(pdfcraft_annot::with_missing_appearances(&cos), &cos))
+            .and_then(|display| write_incremental(&display, &SaveOptions::default()).ok())
+            .map(Arc::new)
+    })
+    .ok()
+    .flatten()
+    .unwrap_or(bytes)
+}
+
+/// The password to give the renderer (`inspect`, `PageRenderer`) for `bytes` opened with
+/// `password`. The renderer authenticates only the user password of R2–R4 files, so for their
+/// owner password this is the user password that owner authentication recovers; otherwise it is
+/// `password` itself. Render paths outside a [`Session`], such as the CLI, use this so the owner
+/// password works there as it does in `doc_open`. A file that doesn't open with `password` keeps
+/// it, so the renderer reports the same error it always did.
+pub fn render_password_for(bytes: Arc<Vec<u8>>, password: Option<&str>) -> Option<String> {
+    let password = password?;
+    let recovered =
+        guard(|| pdfcraft_cos::Document::open_with_password(bytes, Some(password)).ok().and_then(|d| recovered_render_password(&d))).ok().flatten();
+    Some(recovered.unwrap_or_else(|| password.to_owned()))
+}
+
+/// The user password owner authentication recovered from an R2–R4 `cos`, as the renderer takes it.
+fn recovered_render_password(cos: &pdfcraft_cos::Document) -> Option<String> {
+    cos.security().and_then(|s| s.recovered_user_password()).map(|user| renderer_password(&user))
 }
 
 /// Fails when the renderer still draws text under an applied redaction mark.
 ///
 /// Redaction decides what lies under a mark from the positions its own interpreter computes, and
 /// its verify pass reuses them. Where they differ from the renderer's (a standard font without
-/// /Widths, whose advances the interpreter approximates; a CMap, or a font set outside `Tf`,
+/// /Widths, whose advances the interpreter approximates; a CMap
 /// that it reads differently), a mark drawn over the text as displayed lies over glyphs the
 /// interpreter believes are elsewhere: they stay in the file and nothing notices. The renderer is
 /// what the user saw when placing the marks, so it is asked. `after` is written as a save would
-/// write it, without the marks' own overlay (the box and its label are drawn on purpose), its
+/// write it, without the marks' own `overlays` (the box and its label are drawn on purpose), its
 /// text is extracted, and a glyph still mostly inside a mark fails the edit: the caller keeps
 /// the document as it was.
 fn shown_under_redactions(
     after: &pdfcraft_cos::Document,
     marks: &[pdfcraft_redact::Mark],
+    overlays: &[pdfcraft_cos::ObjRef],
     pages: &[pdfcraft_render::PageInfo],
     password: Option<&str>,
 ) -> Result<(), EditError> {
@@ -812,8 +1064,7 @@ fn shown_under_redactions(
     for &pi in &marked {
         let Some(page) = model.get(pi) else { continue };
         let Some(Object::Array(list)) = page.dict.get(b"Contents").map(|c| (*shown.resolve(c)).clone()) else { continue };
-        let kept: Vec<Object> =
-            list.into_iter().filter(|o| shown.resolve(o).as_dict().and_then(|d| d.name(b"PCMark")) != Some(b"Redaction")).collect();
+        let kept: Vec<Object> = list.into_iter().filter(|o| !o.as_ref().is_some_and(|r| overlays.contains(&r))).collect();
         shown.update_dict(page.obj, |d| d.set(b"Contents".to_vec(), Object::Array(kept))).map_err(|e| EditError::Write(e.to_string()))?;
     }
     let bytes = write_incremental(&shown, &SaveOptions::default()).map_err(|e| EditError::Write(e.to_string()))?;
@@ -851,7 +1102,28 @@ fn shown_under_redactions(
 }
 
 fn render_threads() -> usize {
-    std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).clamp(2, 8) - 1
+    std::thread::available_parallelism().map(std::num::NonZeroUsize::get).unwrap_or(4).clamp(2, 8) - 1
+}
+
+/// Write `layers`' visibility into the default optional-content configuration of `cos` (a copy
+/// made for printing): `/BaseState /ON`, `/ON` the visible layers, `/OFF` the hidden ones. Its
+/// other entries (`/Order`, `/RBGroups`, `/AS`…) are kept. A document without `/OCProperties`
+/// is left alone.
+fn set_default_layer_state(cos: &mut pdfcraft_cos::Document, layers: &[Layer]) {
+    use pdfcraft_cos::{Dict, ObjRef, Object};
+    let Some(root_ref) = cos.trailer().get(b"Root").and_then(Object::as_ref) else { return };
+    let Some(mut root) = cos.get(root_ref).as_dict().cloned() else { return };
+    let Some(properties) = root.get(b"OCProperties").cloned() else { return };
+    let Some(mut properties) = cos.resolve(&properties).as_dict().cloned() else { return };
+    let mut config = properties.get(b"D").and_then(|d| cos.resolve(d).as_dict().cloned()).unwrap_or_else(Dict::new);
+    let refs =
+        |visible: bool| Object::Array(layers.iter().filter(|l| l.visible == visible).map(|l| Object::Ref(ObjRef::new(l.id.0, l.id.1))).collect());
+    config.set(b"BaseState".to_vec(), Object::name("ON"));
+    config.set(b"ON".to_vec(), refs(true));
+    config.set(b"OFF".to_vec(), refs(false));
+    properties.set(b"D".to_vec(), Object::Dict(config));
+    root.set(b"OCProperties".to_vec(), Object::Dict(properties));
+    cos.set(root_ref, Object::Dict(root));
 }
 
 /// Render `doc` with the layer visibility in its `info.layers`.
@@ -907,6 +1179,12 @@ pub struct BookmarkRow {
     pub open: bool,
     /// The 0-based page it goes to.
     pub page: Option<usize>,
+    /// Where on that page it goes ([`pdfcraft_render::DestView::Top`] when it doesn't say).
+    pub view: pdfcraft_render::DestView,
+    /// The title's colour (`/C`), `None` for the default black, and its style (`/F`).
+    pub color: Option<[f32; 3]>,
+    pub italic: bool,
+    pub bold: bool,
 }
 
 /// One page of the bookmark list, in outline order.
@@ -934,7 +1212,16 @@ fn outline_rows(items: &[pdfcraft_render::OutlineItem]) -> Vec<BookmarkRow> {
             top.1 += 1;
         }
         let path: Vec<usize> = levels.iter().map(|(_, listed)| listed.saturating_sub(1)).collect();
-        rows.push(BookmarkRow { path, title: item.title.clone(), open: item.open, page: item.page });
+        rows.push(BookmarkRow {
+            path,
+            title: item.title.clone(),
+            open: item.open,
+            page: item.page,
+            view: item.view,
+            color: item.color,
+            italic: item.italic,
+            bold: item.bold,
+        });
         if !item.children.is_empty() {
             levels.push((&item.children, 0));
         }
@@ -1076,7 +1363,7 @@ impl Protection {
             (Some(a), Some(b)) if a == b => return bad("the open password and the permissions password must be different"),
             _ => {}
         }
-        if [&self.open_password, &self.permissions_password].into_iter().flatten().any(|p| p.is_empty()) {
+        if [&self.open_password, &self.permissions_password].into_iter().flatten().any(String::is_empty) {
             return bad("passwords can't be empty");
         }
         if self.algorithm != pdfcraft_cos::Algorithm::Aes256
@@ -1115,14 +1402,20 @@ pub enum Edit {
         pages: Vec<usize>,
         to: usize,
     },
+    /// `pages` reversed among the positions they occupy.
+    ReversePages {
+        pages: Vec<usize>,
+    },
     InsertBlankPage {
         at: usize,
         width: f64,
         height: f64,
     },
-    /// Copies of `pages` inserted after the last of them.
+    /// Copies of `pages` inserted at `at` (an index in the page order as it is now), or after
+    /// the last of them when `at` is `None`.
     DuplicatePages {
         pages: Vec<usize>,
+        at: Option<usize>,
     },
     /// Replace Pages: the content of `pages` is replaced by `src_pages` of another PDF; the
     /// pages' links, comments and bookmarks stay.
@@ -1138,6 +1431,12 @@ pub enum Edit {
         which: PageBox,
         spec: BoxSpec,
     },
+    /// Set or remove the page transition and display time of pages (ISO 32000-2 §12.4.4),
+    /// Organize ▸ Page Transitions.
+    SetTransition {
+        pages: Vec<usize>,
+        spec: TransitionSpec,
+    },
     SetInfo {
         key: String,
         value: String,
@@ -1152,11 +1451,16 @@ pub enum Edit {
         field_conflicts: pdfcraft_organize::FieldConflicts,
     },
     /// Add a bookmark to `page` as child `index` of the bookmark at `parent` (`[]` = top level).
+    /// It goes to the user-space point (`left`, `top`) of the page at the reader's zoom, and
+    /// either may be `None` to keep the reader's position that way (both `None` is the page top).
+    /// A coordinate that is not finite fails the edit.
     AddBookmark {
         parent: Vec<usize>,
         index: usize,
         title: String,
         page: usize,
+        left: Option<f64>,
+        top: Option<f64>,
     },
     RenameBookmark {
         path: Vec<usize>,
@@ -1176,6 +1480,17 @@ pub enum Edit {
     SetBookmarkPage {
         path: Vec<usize>,
         page: usize,
+    },
+    /// Colour a bookmark's title (`/C`); `None` or black is the default black.
+    SetBookmarkColor {
+        path: Vec<usize>,
+        color: Option<[f64; 3]>,
+    },
+    /// Make a bookmark's title bold or italic or not (`/F`); `None` keeps that one.
+    SetBookmarkStyle {
+        path: Vec<usize>,
+        bold: Option<bool>,
+        italic: Option<bool>,
     },
     /// Bookmarks for the tagged headings (H, H1–H6), nested by level under a new first
     /// "Untitled" bookmark (New Bookmarks from Structure).
@@ -1209,6 +1524,8 @@ pub enum Edit {
     AddAnnotation(NewAnnotation),
     /// A custom stamp from a picture file (a PDF page or an image) on `page`. A zero-size
     /// `rect` is a point: the stamp is centred there at its natural size (at most 200 pt).
+    /// Any other `rect` is a box: the picture is scaled to fit inside it, keeping its shape,
+    /// and centred in it (#4077).
     AddCustomStamp {
         page: usize,
         rect: [f64; 4],
@@ -1274,6 +1591,13 @@ pub enum Edit {
         dx: f64,
         dy: f64,
     },
+    /// Reshape a line, connected lines, a polygon or a cloud: its points in user space (a line's
+    /// two ends, the others' corners).
+    ReshapeAnnotation {
+        page: usize,
+        index: usize,
+        points: Vec<[f64; 2]>,
+    },
     /// Resize a rectangle, oval or text box.
     ResizeAnnotation {
         page: usize,
@@ -1294,6 +1618,12 @@ pub enum Edit {
         page: usize,
         index: usize,
         fill: Option<Rgb>,
+    },
+    /// Change the font size (pt) of a text box, typewriter text or callout.
+    FontSizeAnnotation {
+        page: usize,
+        index: usize,
+        size: f64,
     },
     /// Comment properties ▸ General / note icon.
     SetAnnotationInfo {
@@ -1345,6 +1675,18 @@ pub enum Edit {
     },
     /// Document Properties ▸ Initial View (and the language and binding).
     SetInitialView(Box<InitialView>),
+    /// Edit ▸ Attach a file: a document-level attachment (`/Names /EmbeddedFiles`) under
+    /// `name`, made unique; `mime` is the embedded file's `/Subtype` when known.
+    AddAttachment {
+        name: String,
+        bytes: Vec<u8>,
+        description: Option<String>,
+        mime: Option<String>,
+    },
+    /// Remove the document-level attachment whose name-tree key is `key`.
+    DeleteAttachment {
+        key: String,
+    },
     /// Build a tagged structure tree for an untagged, text-only document.
     AutoTagText,
     /// Add alternate text: set (or clear, with `None`) a figure's alternate text. `figure` is
@@ -1353,6 +1695,8 @@ pub enum Edit {
         figure: u32,
         alt: Option<String>,
     },
+    /// Add `/Form` tags and object references for all widgets in an untagged AcroForm.
+    AutoTagFormFields,
     /// Change one property on a reachable indirect structure tag.
     SetTagProperty {
         object: pdfcraft_cos::ObjRef,
@@ -1368,6 +1712,10 @@ pub enum Edit {
     /// Add alternate text ▸ Decorative figure: the figure's content becomes an artifact.
     MarkDecorative {
         figure: u32,
+    },
+    /// Tags panel ▸ Mark as artifact: retire a leaf tag and mark its content as an artifact.
+    MarkTagArtifact {
+        object: pdfcraft_cos::ObjRef,
     },
     /// Document JavaScripts: add, replace (`script`) or remove (`None`) the document-level
     /// script `name`.
@@ -1386,6 +1734,10 @@ pub enum Edit {
     /// forbidden actions, annotation flags, …).
     ConvertPdfA {
         level: pdfcraft_preflight::Level,
+    },
+    /// Remove what identifies the document as meeting `standard` (PDF/A or PDF/X).
+    RemoveStandardId {
+        standard: Standard,
     },
     /// What a script (button or console) changed in form fields: values, read-only, required
     /// and visibility.
@@ -1443,6 +1795,11 @@ pub enum Edit {
         name: String,
         earlier: bool,
     },
+    /// Set the calculation order: these calculated fields first, in this order, then the others
+    /// in their current order (see [`Document::calculation_order`]). The form recalculates.
+    SetCalculationOrder {
+        names: Vec<String>,
+    },
     /// Add a header and footer (with `replace`, existing ones on those pages go first).
     AddHeaderFooter {
         pages: Vec<usize>,
@@ -1497,6 +1854,16 @@ pub enum Edit {
         name: String,
         bytes: Arc<Vec<u8>>,
     },
+    /// Edit ▸ Paste: an added item copied in this document or another, as it was: text with its
+    /// style, an image in its box (display space) with its turns, flips and crop. An image's
+    /// picture is `file` (from [`Document::added_image_file`]): the copied image object is reused
+    /// while it is still that picture in this document, else one an added image here already draws
+    /// it from, else the file is embedded.
+    PasteContent {
+        page: usize,
+        content: AddedContent,
+        file: Option<(String, Arc<Vec<u8>>)>,
+    },
     /// Apply redaction marks (all, or those on `pages`): remove what they cover for good.
     ApplyRedactions {
         pages: Option<Vec<usize>>,
@@ -1542,6 +1909,11 @@ pub enum Edit {
     },
     /// Sanitize Document: every category, then a full rewrite on save.
     Sanitize,
+    /// An XFA form made an ordinary (static) PDF form: the XFA packets, `/NeedsRendering` and
+    /// PdfCraft's private keys go, the pages as laid out and the fields with their values
+    /// stay, so every viewer shows the same form and none lays it out again. Its scripts no
+    /// longer run.
+    XfaToStatic,
     /// Flatten comments and/or form fields on every page into page content.
     Flatten {
         comments: bool,
@@ -1630,6 +2002,7 @@ pub const EDIT_LABELS: &[&str] = &[
     "Delete pages",
     "Move page",
     "Move pages",
+    "Reverse pages",
     "Insert blank page",
     "Duplicate page",
     "Duplicate pages",
@@ -1638,6 +2011,7 @@ pub const EDIT_LABELS: &[&str] = &[
     "Crop page",
     "Crop pages",
     "Set page boxes",
+    "Set page transitions",
     "Change Title",
     "Change Author",
     "Change Subject",
@@ -1646,11 +2020,15 @@ pub const EDIT_LABELS: &[&str] = &[
     "Insert pages from {name}",
     "Insert pages from {name} — 1 field renamed",
     "Insert pages from {name} — fields renamed",
+    "Attach {name}",
+    "Delete attachment {key}",
     "Add bookmark",
     "Rename bookmark",
     "Delete bookmark",
     "Move bookmark",
     "Set bookmark destination",
+    "Colour",
+    "Style",
     "New bookmarks from structure",
     "Number pages",
     "Measure distance",
@@ -1695,6 +2073,7 @@ pub const EDIT_LABELS: &[&str] = &[
     "Lock comment",
     "Unlock comment",
     "Move comment",
+    "Reshape comment",
     "Resize comment",
     "Change comment properties",
     "Fill in {name}",
@@ -1705,6 +2084,7 @@ pub const EDIT_LABELS: &[&str] = &[
     "Delete field",
     "Duplicate field",
     "Set tab order",
+    "Set calculation order",
     "Change initial view",
     "Set alternate text",
     "Mark figure as decorative",
@@ -1712,6 +2092,7 @@ pub const EDIT_LABELS: &[&str] = &[
     "Run JavaScript",
     "Run form script",
     "Save as {level}",
+    "Remove {standard} identification",
     "Edit script of {name}",
     "Delete document JavaScript",
     "Edit document JavaScript",
@@ -1737,6 +2118,7 @@ pub const EDIT_LABELS: &[&str] = &[
     "Add image",
     "Edit content",
     "Delete content",
+    "Paste",
     "Apply redactions",
     "Remove redaction marks",
     "Remove hidden information",
@@ -1759,7 +2141,8 @@ pub const EDIT_LABELS: &[&str] = &[
 /// The names of the batches built below L7, which an interface shows in the same places as
 /// [`EDIT_LABELS`] and so translates the same way. A batch built in the interface itself arrives
 /// already worded in the interface's language.
-pub const BATCH_LABELS: &[&str] = &["Set document title", "Mark differences", "Detect form fields", "Run JavaScript", "Recognize text"];
+pub const BATCH_LABELS: &[&str] =
+    &["Set document title", "Mark differences", "Detect form fields", "Run JavaScript", "Recognize text", field_table::LABEL, "Style"];
 
 impl Edit {
     /// Label for the Edit menu and history ("Undo Rotate pages").
@@ -1768,11 +2151,13 @@ impl Edit {
             Edit::RotatePages { pages, .. } => plural("Rotate page", "Rotate pages", pages.len()),
             Edit::DeletePages { pages } => plural("Delete page", "Delete pages", pages.len()),
             Edit::MovePages { pages, .. } => plural("Move page", "Move pages", pages.len()),
+            Edit::ReversePages { .. } => Label::of("Reverse pages"),
             Edit::InsertBlankPage { .. } => Label::of("Insert blank page"),
-            Edit::DuplicatePages { pages } => plural("Duplicate page", "Duplicate pages", pages.len()),
+            Edit::DuplicatePages { pages, .. } => plural("Duplicate page", "Duplicate pages", pages.len()),
             Edit::ReplacePages { pages, .. } => plural("Replace page", "Replace pages", pages.len()),
             Edit::SetPageBox { pages, which: PageBox::Crop, .. } => plural("Crop page", "Crop pages", pages.len()),
             Edit::SetPageBox { .. } => Label::of("Set page boxes"),
+            Edit::SetTransition { .. } => Label::of("Set page transitions"),
             // The four `/Info` keys PdfCraft itself offers get a wording of their own, so each can
             // be said in another language; any other key is the document's and goes in as it stands.
             Edit::SetInfo { key, .. } => match key.as_str() {
@@ -1788,6 +2173,9 @@ impl Edit {
             Edit::DeleteBookmark { .. } => Label::of("Delete bookmark"),
             Edit::MoveBookmark { .. } => Label::of("Move bookmark"),
             Edit::SetBookmarkPage { .. } => Label::of("Set bookmark destination"),
+            // The bookmark Style and Colour menus' own names, already said in every language.
+            Edit::SetBookmarkColor { .. } => Label::of("Colour"),
+            Edit::SetBookmarkStyle { .. } => Label::of("Style"),
             Edit::BookmarksFromStructure => Label::of("New bookmarks from structure"),
             Edit::NumberPages { .. } => Label::of("Number pages"),
             // What was measured is part of the wording too, for the same reason.
@@ -1819,8 +2207,11 @@ impl Edit {
             Edit::LockAnnotation { locked: true, .. } => Label::of("Lock comment"),
             Edit::LockAnnotation { .. } => Label::of("Unlock comment"),
             Edit::MoveAnnotation { .. } => Label::of("Move comment"),
+            Edit::ReshapeAnnotation { .. } => Label::of("Reshape comment"),
             Edit::ResizeAnnotation { .. } => Label::of("Resize comment"),
-            Edit::StyleAnnotation { .. } | Edit::FillAnnotation { .. } | Edit::SetAnnotationInfo { .. } => Label::of("Change comment properties"),
+            Edit::StyleAnnotation { .. } | Edit::FillAnnotation { .. } | Edit::FontSizeAnnotation { .. } | Edit::SetAnnotationInfo { .. } => {
+                Label::of("Change comment properties")
+            }
             Edit::SetFieldValue { name, .. } => Label::with("Fill in {name}", name.as_str()),
             Edit::SetFieldImage { name, .. } => Label::with("Set the image of {name}", name.as_str()),
             Edit::ResetForm { .. } => Label::of("Clear form"),
@@ -1829,17 +2220,23 @@ impl Edit {
             Edit::DeleteField { .. } => Label::of("Delete field"),
             Edit::DuplicateField { .. } => Label::of("Duplicate field"),
             Edit::SetTabOrder { .. } | Edit::MoveInTabOrder { .. } => Label::of("Set tab order"),
+            Edit::SetCalculationOrder { .. } => Label::of("Set calculation order"),
             Edit::SetInitialView(_) => Label::of("Change initial view"),
+            Edit::AddAttachment { name, .. } => Label::with("Attach {name}", name.as_str()),
+            Edit::DeleteAttachment { key } => Label::with("Delete attachment {key}", key.as_str()),
             Edit::AutoTagText => Label::of("Automatically tag text"),
             Edit::SetAltText { .. } => Label::of("Set alternate text"),
+            Edit::AutoTagFormFields => Label::of("Tag form fields"),
             Edit::SetTagProperty { .. } => Label::of("Change tag properties"),
             Edit::MoveTag { .. } => Label::of("Move object"),
             Edit::MarkDecorative { .. } => Label::of("Mark figure as decorative"),
+            Edit::MarkTagArtifact { .. } => Label::of("Mark content as artifact"),
             Edit::AddOcrText { .. } => Label::of("Recognize text"),
             Edit::ApplyScriptChanges { .. } => Label::of("Run JavaScript"),
             Edit::XfaEvent { .. } => Label::of("Run form script"),
             // The level is the standard's own name ("PDF/A-2b"), so it goes in as it stands.
             Edit::ConvertPdfA { level } => Label::with("Save as {level}", level.label()),
+            Edit::RemoveStandardId { standard } => Label::with("Remove {standard} identification", standard.label()),
             Edit::SetFieldScript { name, .. } => Label::with("Edit script of {name}", name.as_str()),
             Edit::SetDocumentScript { script: None, .. } => Label::of("Delete document JavaScript"),
             Edit::SetDocumentScript { .. } => Label::of("Edit document JavaScript"),
@@ -1848,7 +2245,8 @@ impl Edit {
             Edit::MoveObjects { objects, .. } => plural("Move object", "Move objects", objects.len()),
             Edit::EditPageImage { change, .. } => Label::of(match change {
                 ImageEdit::Move(_) => "Move image",
-                ImageEdit::Rotate(_) => "Rotate image",
+                ImageEdit::Rotate(_) | ImageEdit::RotateBy(_) => "Rotate image",
+                ImageEdit::Crop(_) => "Crop image",
                 ImageEdit::Flip { .. } => "Flip image",
                 ImageEdit::Replace { .. } => "Replace image",
                 ImageEdit::Delete => "Delete image",
@@ -1867,6 +2265,7 @@ impl Edit {
             Edit::UpdateContent { .. } => Label::of("Edit content"),
             Edit::DeleteContent { .. } => Label::of("Delete content"),
             Edit::ReplaceImage { .. } => Label::of("Replace image"),
+            Edit::PasteContent { .. } => Label::of("Paste"),
             Edit::ApplyRedactions { .. } => Label::of("Apply redactions"),
             Edit::ClearRedactions => Label::of("Remove redaction marks"),
             Edit::RemoveHidden { .. } => Label::of("Remove hidden information"),
@@ -1877,6 +2276,7 @@ impl Edit {
             Edit::RemoveLinks { .. } => Label::of("Remove all links"),
             Edit::AddLinks { links, .. } => plural("Create link", "Create links", links.len()),
             Edit::Sanitize => Label::of("Sanitize document"),
+            Edit::XfaToStatic => Label::of("Convert to a static form"),
             Edit::Flatten { comments: true, fields: false } => Label::of("Flatten comments"),
             Edit::Flatten { comments: false, fields: true } => Label::of("Flatten form fields"),
             Edit::Flatten { .. } => Label::of("Flatten"),
@@ -1935,10 +2335,12 @@ fn check_permission(edit: &Edit, p: &pdfcraft_cos::Permissions) -> Result<(), Ed
         Edit::RotatePages { .. }
         | Edit::DeletePages { .. }
         | Edit::MovePages { .. }
+        | Edit::ReversePages { .. }
         | Edit::InsertBlankPage { .. }
         | Edit::DuplicatePages { .. }
         | Edit::ReplacePages { .. }
         | Edit::SetPageBox { .. }
+        | Edit::SetTransition { .. }
         | Edit::InsertPagesFrom { .. }
         // "Assemble the document: insert, rotate or delete pages and create bookmarks" (Table 22).
         | Edit::AddBookmark { .. }
@@ -1946,6 +2348,8 @@ fn check_permission(edit: &Edit, p: &pdfcraft_cos::Permissions) -> Result<(), Ed
         | Edit::DeleteBookmark { .. }
         | Edit::MoveBookmark { .. }
         | Edit::SetBookmarkPage { .. }
+        | Edit::SetBookmarkColor { .. }
+        | Edit::SetBookmarkStyle { .. }
         | Edit::BookmarksFromStructure
         | Edit::NumberPages { .. } => {
             if p.assemble() {
@@ -1968,9 +2372,11 @@ fn check_permission(edit: &Edit, p: &pdfcraft_cos::Permissions) -> Result<(), Ed
         | Edit::EraseInk { .. }
         | Edit::LockAnnotation { .. }
         | Edit::MoveAnnotation { .. }
+        | Edit::ReshapeAnnotation { .. }
         | Edit::ResizeAnnotation { .. }
         | Edit::StyleAnnotation { .. }
         | Edit::FillAnnotation { .. }
+        | Edit::FontSizeAnnotation { .. }
         | Edit::SetAnnotationInfo { .. }
         | Edit::SetMeasurementScale { .. } => {
             if p.annotate() {
@@ -1993,6 +2399,15 @@ fn check_permission(edit: &Edit, p: &pdfcraft_cos::Permissions) -> Result<(), Ed
                 Err(EditError::NotPermitted("changing security"))
             }
         }
+        // Converting to PDF/A takes the encryption off (PDF/A forbids it), so on an encrypted
+        // document it is a change of security (#3921).
+        Edit::ConvertPdfA { .. } => {
+            if unrestricted(p) {
+                Ok(())
+            } else {
+                Err(EditError::NotPermitted("removing the encryption, which PDF/A forbids"))
+            }
+        }
         Edit::SetInfo { .. }
         | Edit::AddHeaderFooter { .. }
         | Edit::AddWatermark { .. }
@@ -2006,6 +2421,7 @@ fn check_permission(edit: &Edit, p: &pdfcraft_cos::Permissions) -> Result<(), Ed
         | Edit::MoveObjects { .. }
         | Edit::DeleteContent { .. }
         | Edit::ReplaceImage { .. }
+        | Edit::PasteContent { .. }
         | Edit::ClearRedactions
         | Edit::RemoveHidden { .. }
         | Edit::ImportData { .. }
@@ -2015,21 +2431,27 @@ fn check_permission(edit: &Edit, p: &pdfcraft_cos::Permissions) -> Result<(), Ed
         | Edit::RemoveLinks { .. }
         | Edit::AddLinks { .. }
         | Edit::Sanitize
+        | Edit::XfaToStatic
         | Edit::SetFieldProps { .. }
         | Edit::DeleteField { .. }
         | Edit::DuplicateField { .. }
         | Edit::SetTabOrder { .. }
         | Edit::MoveInTabOrder { .. }
+        | Edit::SetCalculationOrder { .. }
         | Edit::SetInitialView(_)
+        | Edit::AddAttachment { .. }
+        | Edit::DeleteAttachment { .. }
         | Edit::AutoTagText
         | Edit::SetAltText { .. }
+        | Edit::AutoTagFormFields
         | Edit::SetTagProperty { .. }
         | Edit::MoveTag { .. }
         | Edit::MarkDecorative { .. }
+        | Edit::MarkTagArtifact { .. }
         | Edit::AddOcrText { .. }
         | Edit::SetDocumentScript { .. }
         | Edit::SetFieldScript { .. }
-        | Edit::ConvertPdfA { .. }
+        | Edit::RemoveStandardId { .. }
         | Edit::EditTextLine { .. }
         | Edit::EditTextBlock { .. }
         | Edit::RegisterTextFont { .. }
@@ -2058,6 +2480,10 @@ struct EditCtx {
     xfa_datasets: Option<pdfcraft_cos::ObjRef>,
     /// A form script ran too long and was abandoned: the document's scripts go off.
     xfa_ran_away: bool,
+    /// What the XFA scripts' time limits are multiplied by ([`Session::with_xfa_time_scale`]).
+    xfa_time_scale: u32,
+    /// The edit took the XFA out of the form: what went with it, for the document's warnings.
+    xfa_removed: Vec<String>,
     /// Pages in the document, for `xfa.layout.pageCount()`.
     pages: usize,
     date: Option<String>,
@@ -2068,6 +2494,9 @@ struct EditCtx {
     /// Fields the edit renamed to keep imported names separate (old → new), for the repair
     /// log and the undo label.
     renamed_fields: Vec<(String, String)>,
+    /// The overlay streams the edit's applied redactions added, which alone the renderer's check
+    /// leaves out.
+    redaction_overlays: Vec<pdfcraft_cos::ObjRef>,
 }
 
 impl EditCtx {
@@ -2087,12 +2516,15 @@ impl EditCtx {
             xfa_out: Default::default(),
             xfa_datasets: None,
             xfa_ran_away: false,
+            xfa_time_scale: 1,
+            xfa_removed: Vec::new(),
             pages: 0,
             date: now.map(pdfcraft_cos::pdf_date),
             today: (1970, 1, 1),
             seed,
             count: 0,
             renamed_fields: Vec::new(),
+            redaction_overlays: Vec::new(),
         }
     }
 
@@ -2139,27 +2571,31 @@ fn run_edit(doc: &mut pdfcraft_cos::Document, edit: &Edit, cx: &mut EditCtx) -> 
         Edit::RotatePages { pages, degrees } => pdfcraft_organize::rotate_pages(doc, pages, *degrees)?,
         Edit::DeletePages { pages } => pdfcraft_organize::delete_pages(doc, pages)?,
         Edit::MovePages { pages, to } => pdfcraft_organize::move_pages(doc, pages, *to)?,
+        Edit::ReversePages { pages } => pdfcraft_organize::reverse_pages(doc, pages)?,
         Edit::InsertBlankPage { at, width, height } => {
             pdfcraft_organize::insert_blank_page(doc, *at, *width, *height)?;
         }
         Edit::SetInfo { key, value } => pdfcraft_organize::set_info(doc, key, value)?,
-        Edit::DuplicatePages { pages } => pdfcraft_organize::duplicate_pages(doc, pages)?,
+        Edit::DuplicatePages { pages, at } => pdfcraft_organize::duplicate_pages(doc, pages, *at)?,
         Edit::ReplacePages { pages, name, bytes, src_pages } => {
             let src = open_source(name, bytes)?;
             pdfcraft_organize::replace_pages(doc, pages, &src, src_pages)?;
         }
         Edit::SetPageBox { pages, which, spec } => pdfcraft_organize::set_page_box(doc, pages, *which, *spec)?,
+        Edit::SetTransition { pages, spec } => pdfcraft_organize::set_transition(doc, pages, spec)?,
         Edit::InsertPagesFrom { name, bytes, pages, at, field_conflicts } => {
             let src = open_source(name, bytes)?;
             let pages = match pages {
                 Some(p) => p.clone(),
                 None => (0..pdfcraft_organize::page_count(&src)?).collect(),
             };
-            let outcome = pdfcraft_organize::import_pages_with(doc, &src, &pages, *at, *field_conflicts)?;
+            // The file's bookmarks come along under one named after it, as in Combine Files.
+            let title = std::path::Path::new(name).file_stem().map_or_else(|| name.clone(), |s| s.to_string_lossy().into_owned());
+            let outcome = pdfcraft_organize::insert_file_pages(doc, &src, &title, &pages, *at, *field_conflicts)?;
             cx.renamed_fields = outcome.renamed_fields;
         }
-        Edit::AddBookmark { parent, index, title, page } => {
-            pdfcraft_organize::add_bookmark(doc, parent, *index, title, *page)?;
+        Edit::AddBookmark { parent, index, title, page, left, top } => {
+            pdfcraft_organize::add_bookmark_at(doc, parent, *index, title, *page, *left, *top)?;
         }
         Edit::RenameBookmark { path, title } => pdfcraft_organize::rename_bookmark(doc, path, title)?,
         Edit::DeleteBookmark { path } => pdfcraft_organize::delete_bookmark(doc, path)?,
@@ -2167,6 +2603,8 @@ fn run_edit(doc: &mut pdfcraft_cos::Document, edit: &Edit, cx: &mut EditCtx) -> 
             pdfcraft_organize::move_bookmark(doc, from, to_parent, *index)?;
         }
         Edit::SetBookmarkPage { path, page } => pdfcraft_organize::set_bookmark_page(doc, path, *page)?,
+        Edit::SetBookmarkColor { path, color } => pdfcraft_organize::set_bookmark_color(doc, path, *color)?,
+        Edit::SetBookmarkStyle { path, bold, italic } => pdfcraft_organize::set_bookmark_style(doc, path, *bold, *italic)?,
         Edit::BookmarksFromStructure => {
             let entries: Vec<_> = pdfcraft_a11y::headings(doc)
                 .into_iter()
@@ -2191,12 +2629,14 @@ fn run_edit(doc: &mut pdfcraft_cos::Document, edit: &Edit, cx: &mut EditCtx) -> 
             let (sw, sh) = (src.size.0.max(1.0), src.size.1.max(1.0));
             let natural = rect[2] == rect[0] && rect[3] == rect[1];
             let rotation = pdfcraft_organize::page_rotation(doc, *page)?;
+            // The picture as displayed: a quarter turn swaps its sides in user space.
+            let (dw, dh) = if matches!(rotation, 90 | 270) { (sh, sw) } else { (sw, sh) };
             let rect = if natural {
                 let k = (200.0 / sw.max(sh)).min(1.0);
-                let (w, h) = if matches!(rotation, 90 | 270) { (sh * k, sw * k) } else { (sw * k, sh * k) };
+                let (w, h) = (dw * k, dh * k);
                 [rect[0] - w / 2.0, rect[1] - h / 2.0, rect[0] + w / 2.0, rect[1] + h / 2.0]
             } else {
-                *rect
+                fit_picture(*rect, dw, dh)
             };
             let shape = Shape::CustomStamp { rect, name: name.clone(), picture: src.xobject, image: src.image, size: (sw, sh) };
             let style = pdfcraft_annot::Style::default_for(&shape);
@@ -2215,33 +2655,56 @@ fn run_edit(doc: &mut pdfcraft_cos::Document, edit: &Edit, cx: &mut EditCtx) -> 
         Edit::EraseInk { page, index, path, radius } => {
             pdfcraft_annot::erase_ink(doc, *page, *index, path, *radius, &cx.meta())?;
         }
+        Edit::AddAttachment { name, bytes, description, mime } => {
+            pdfcraft_organize::add_attachment(doc, name, bytes, description.as_deref(), mime.as_deref(), cx.date.as_deref())?;
+        }
+        Edit::DeleteAttachment { key } => pdfcraft_organize::delete_attachment(doc, key)?,
         Edit::ReplaceText { page, quads, text, author, strike, caret } => {
-            pdfcraft_annot::add_text_replacement(doc, *page, quads, text, author, strike, caret, &cx.meta())?;
+            // One `/NM` each: the caret replies to the strikeout, and XFDF names that reply by
+            // the strikeout's `/NM` (#2666).
+            let (strike_meta, caret_meta) = (cx.meta(), cx.meta());
+            pdfcraft_annot::add_text_replacement(doc, *page, quads, text, author, strike, caret, &strike_meta, &caret_meta)?;
         }
         Edit::MarkAnnotation { page, index, marked, author } => {
             pdfcraft_annot::set_marked(doc, *page, *index, *marked, author, &cx.meta())?;
         }
         Edit::LockAnnotation { page, index, locked } => pdfcraft_annot::set_locked(doc, *page, *index, *locked)?,
         Edit::MoveAnnotation { page, index, dx, dy } => pdfcraft_annot::move_annotation(doc, *page, *index, *dx, *dy, &cx.meta())?,
+        Edit::ReshapeAnnotation { page, index, points } => pdfcraft_annot::set_points(doc, *page, *index, points, &cx.meta())?,
         Edit::ResizeAnnotation { page, index, rect } => pdfcraft_annot::set_rect(doc, *page, *index, *rect, &cx.meta())?,
         Edit::StyleAnnotation { page, index, color, opacity, width, endings } => {
             pdfcraft_annot::set_style(doc, *page, *index, *color, *opacity, *width, endings.as_deref(), &cx.meta())?;
         }
         Edit::FillAnnotation { page, index, fill } => pdfcraft_annot::set_fill(doc, *page, *index, *fill, &cx.meta())?,
+        Edit::FontSizeAnnotation { page, index, size } => pdfcraft_annot::set_font_size(doc, *page, *index, *size, &cx.meta())?,
         Edit::SetAnnotationInfo { page, index, author, subject, icon } => {
             pdfcraft_annot::set_info(doc, *page, *index, author.as_deref(), subject.as_deref(), *icon, &cx.meta())?;
         }
-        Edit::SetFieldValue { name, value } => match cx.js.as_mut() {
-            Some(js) => pdfcraft_forms::set_value_with(doc, name, value, js)?,
-            None => pdfcraft_forms::set_value(doc, name, value)?,
-        },
+        Edit::SetFieldValue { name, value } => {
+            let mut set = |doc: &mut pdfcraft_cos::Document, value: &FieldValue| match cx.js.as_mut() {
+                Some(js) => pdfcraft_forms::set_value_with(doc, name, value, js),
+                None => pdfcraft_forms::set_value(doc, name, value),
+            };
+            match set(doc, value) {
+                Ok(()) => {}
+                // A date the field's format doesn't read may be typed by another of an XFA date
+                // field's patterns: it is kept in the first. Only a format refusal is tried
+                // again: it comes before any of the field's scripts run, so they run once.
+                Err(refused @ pdfcraft_forms::FormError::Format(_)) => match xfa::typed_date(doc, cx.xfa.as_deref(), name, value) {
+                    Some(typed) => set(doc, &typed)?,
+                    None => return Err(refused.into()),
+                },
+                Err(refused) => return Err(refused.into()),
+            }
+        }
         Edit::ApplyScriptChanges { changes } => match cx.js.as_mut() {
             Some(js) => pdfcraft_forms::apply_script_changes(doc, changes, js)?,
             None => pdfcraft_forms::apply_script_changes(doc, changes, &mut pdfcraft_forms::NoScripts)?,
         },
         Edit::XfaEvent { som, activity } => {
             let tpl = cx.xfa.clone().ok_or_else(|| EditError::Invalid("this is not a laid-out XFA form, or JavaScript is off".into()))?;
-            let mut run = xfa::XfaRun { page_count: cx.pages, out: &mut cx.xfa_out, datasets: cx.xfa_datasets, ran_away: false };
+            let mut run =
+                xfa::XfaRun { page_count: cx.pages, out: &mut cx.xfa_out, datasets: cx.xfa_datasets, ran_away: false, time_scale: cx.xfa_time_scale };
             let ran = xfa::on_event(doc, &tpl, som, activity, &mut run);
             cx.xfa_datasets = run.datasets;
             cx.xfa_ran_away |= run.ran_away;
@@ -2262,7 +2725,7 @@ fn run_edit(doc: &mut pdfcraft_cos::Document, edit: &Edit, cx: &mut EditCtx) -> 
                 && pdfcraft_forms::fields(doc).iter().any(|f| f.name == *name && f.button == Some(pdfcraft_forms::af::ButtonAction::ImportIcon));
             if image_field {
                 let Some(content_type) = image_content_type(image) else {
-                    return Err(EditError::Invalid(format!("{name}: an XFA form keeps a PNG, JPEG or GIF picture; choose one of those")));
+                    return Err(EditError::Invalid(format!("{name}: an XFA form keeps a PNG, JPEG, GIF, BMP or TIFF picture; choose one of those")));
                 };
                 pdfcraft_forms::set_button_icon(doc, name, img, px)?;
                 let som = pdfcraft_xfa::fields_by_som(doc).into_iter().find(|(_, n)| n == name).map(|(s, _)| s).unwrap_or_else(|| name.clone());
@@ -2299,6 +2762,14 @@ fn run_edit(doc: &mut pdfcraft_cos::Document, edit: &Edit, cx: &mut EditCtx) -> 
         Edit::DeleteField { name } => pdfcraft_forms::delete_field(doc, name)?,
         Edit::SetTabOrder { pages, order } => pdfcraft_forms::set_tab_order(doc, pages, *order)?,
         Edit::MoveInTabOrder { name, earlier } => pdfcraft_forms::move_in_tab_order(doc, name, *earlier)?,
+        // As after a script edit: the values the new order gives show at once.
+        Edit::SetCalculationOrder { names } => {
+            pdfcraft_forms::set_calculation_order(doc, names)?;
+            match cx.js.as_mut() {
+                Some(js) => pdfcraft_forms::recalculate_with(doc, js)?,
+                None => pdfcraft_forms::recalculate(doc)?,
+            };
+        }
         Edit::SetInitialView(v) => pdfcraft_organize::set_initial_view(doc, v)?,
         Edit::AutoTagText => {
             a11y::autotag_text(doc).map_err(|e| EditError::Accessibility(e.to_string()))?;
@@ -2306,6 +2777,9 @@ fn run_edit(doc: &mut pdfcraft_cos::Document, edit: &Edit, cx: &mut EditCtx) -> 
         Edit::SetAltText { figure, alt } => {
             let r = pdfcraft_cos::ObjRef::new(*figure, doc.generation(*figure));
             a11y::set_alt(doc, r, alt.as_deref()).map_err(|e| EditError::Accessibility(e.to_string()))?;
+        }
+        Edit::AutoTagFormFields => {
+            a11y::tag_form_fields(doc).map_err(EditError::Accessibility)?;
         }
         Edit::SetTagProperty { object, property, value } => {
             a11y::set_tag_property(doc, *object, *property, value.as_deref()).map_err(|e| EditError::Accessibility(e.to_string()))?;
@@ -2326,6 +2800,7 @@ fn run_edit(doc: &mut pdfcraft_cos::Document, edit: &Edit, cx: &mut EditCtx) -> 
         Edit::ConvertPdfA { level } => {
             pdfcraft_preflight::convert(doc, *level).map_err(|e| EditError::Invalid(e.to_string()))?;
         }
+        Edit::RemoveStandardId { standard } => pdfcraft_organize::remove_standard_id(doc, *standard)?,
         Edit::SetDocumentScript { name, script } => pdfcraft_forms::set_document_script(doc, name, script.as_deref())?,
         Edit::AddOcrText { page, words } => {
             pdfcraft_edit::stamp(doc, *page, "OCR", pdfcraft_ocr::text_layer(words))?;
@@ -2339,6 +2814,11 @@ fn run_edit(doc: &mut pdfcraft_cos::Document, edit: &Edit, cx: &mut EditCtx) -> 
                 ImageEdit::Move(to) => pdfcraft_edit::ImageChange::Transform(pdfcraft_edit::rect_to_rect(img.rect, *to)),
                 ImageEdit::Rotate(q) => {
                     pdfcraft_edit::ImageChange::Transform(pdfcraft_edit::turn_about_centre(img.visible_rect.unwrap_or(img.rect), *q, false, false))
+                }
+                ImageEdit::RotateBy(degrees) => {
+                    let t = pdfcraft_edit::turn_by_degrees(img.visible_rect.unwrap_or(img.rect), *degrees)
+                        .ok_or_else(|| EditError::Edit(pdfcraft_edit::EditError::Invalid("the rotation angle must be a finite number".into())))?;
+                    pdfcraft_edit::ImageChange::Transform(t)
                 }
                 ImageEdit::Flip { horizontal } => pdfcraft_edit::ImageChange::Transform(pdfcraft_edit::turn_about_centre(
                     img.visible_rect.unwrap_or(img.rect),
@@ -2354,6 +2834,7 @@ fn run_edit(doc: &mut pdfcraft_cos::Document, edit: &Edit, cx: &mut EditCtx) -> 
                     }
                     pdfcraft_edit::ImageChange::Replace(embed_image(doc, name, bytes)?.0)
                 }
+                ImageEdit::Crop(keep) => pdfcraft_edit::ImageChange::Crop(*keep),
                 ImageEdit::Delete => pdfcraft_edit::ImageChange::Delete,
             };
             pdfcraft_edit::change_image(doc, *page, *index, &c)?;
@@ -2368,6 +2849,9 @@ fn run_edit(doc: &mut pdfcraft_cos::Document, edit: &Edit, cx: &mut EditCtx) -> 
         Edit::MarkDecorative { figure } => {
             let r = pdfcraft_cos::ObjRef::new(*figure, doc.generation(*figure));
             a11y::mark_decorative(doc, r).map_err(|e| EditError::Accessibility(e.to_string()))?;
+        }
+        Edit::MarkTagArtifact { object } => {
+            a11y::mark_tag_artifact(doc, *object).map_err(|e| EditError::Accessibility(e.to_string()))?;
         }
         Edit::AddHeaderFooter { pages, settings, replace } => {
             let date = cx.today;
@@ -2420,8 +2904,30 @@ fn run_edit(doc: &mut pdfcraft_cos::Document, edit: &Edit, cx: &mut EditCtx) -> 
             let (image, _) = embed_image(doc, name, bytes)?;
             pdfcraft_edit::update_content(doc, *page, *index, &AddedContent::Image(pdfcraft_edit::AddedImage { image, ..old }))?;
         }
+        Edit::PasteContent { page, content, file } => {
+            let content = match content {
+                AddedContent::Text(_) => content.clone(),
+                AddedContent::Image(img) => {
+                    let Some((name, bytes)) = file else {
+                        return Err(EditError::Edit(pdfcraft_edit::EditError::Invalid("a pasted image needs its picture".into())));
+                    };
+                    // The same picture in this document (copied here, pasted here before, or an
+                    // identical file): drawn again from the one image object rather than stored twice.
+                    let image = if copy_image::is_picture(doc, img.image, bytes) {
+                        img.image
+                    } else {
+                        match copy_image::added_picture(doc, bytes) {
+                            Some(image) => image,
+                            None => embed_image(doc, name, bytes)?.0,
+                        }
+                    };
+                    AddedContent::Image(pdfcraft_edit::AddedImage { image, ..img.clone() })
+                }
+            };
+            pdfcraft_edit::add_content(doc, *page, &content)?;
+        }
         Edit::ApplyRedactions { pages } => {
-            pdfcraft_redact::apply(doc, pages.as_deref())?;
+            cx.redaction_overlays = pdfcraft_redact::apply(doc, pages.as_deref())?.overlays;
         }
         Edit::ClearRedactions => {
             pdfcraft_redact::clear_marks(doc, None)?;
@@ -2468,8 +2974,26 @@ fn run_edit(doc: &mut pdfcraft_cos::Document, edit: &Edit, cx: &mut EditCtx) -> 
             pdfcraft_redact::sanitize::sanitize(doc)?;
         }
         Edit::Flatten { comments, fields } => {
+            // An XFA form's fields baked into the pages: the XFA goes too, or Adobe's viewers
+            // would lay the form out again from its template over the baked pages. A dynamic
+            // form that was never laid out keeps its XFA: without it only placeholders remain.
+            let shape = (*fields).then(|| pdfcraft_xfa::xfa_shape(doc)).flatten();
             let n = pdfcraft_model::pages(doc).len();
             pdfcraft_edit::flatten(doc, &(0..n).collect::<Vec<_>>(), *comments, *fields)?;
+            match shape {
+                Some(shape) if shape.strippable() => strip_xfa(doc, cx)?,
+                Some(_) => cx.xfa_removed.push("The XFA was kept: this dynamic form was not laid out, so its fields were not baked in".into()),
+                None => {}
+            }
+        }
+        Edit::XfaToStatic => {
+            let Some(shape) = pdfcraft_xfa::xfa_shape(doc) else {
+                return Err(EditError::Invalid("this document is not an XFA form".into()));
+            };
+            if !shape.strippable() {
+                return Err(EditError::Invalid("this dynamic XFA form was not laid out, so there is no static form to keep".into()));
+            }
+            strip_xfa(doc, cx)?;
         }
         Edit::FlattenFillSign => {
             let n = pdfcraft_model::pages(doc).len();
@@ -2508,7 +3032,7 @@ fn run_edit(doc: &mut pdfcraft_cos::Document, edit: &Edit, cx: &mut EditCtx) -> 
 
 /// The comment list, read from the object graph (as `inspect` lists comments).
 fn comment_list(doc: &pdfcraft_cos::Document) -> Vec<pdfcraft_render::Annotation> {
-    pdfcraft_annot::summaries(doc)
+    let mut list: Vec<pdfcraft_render::Annotation> = pdfcraft_annot::summaries(doc)
         .into_iter()
         // Atlas fork: AutoCAD SHX text is drawing text, not comments (as at open).
         .filter(|s| !s.author.as_deref().is_some_and(pdfcraft_render::shx::is_shx_author))
@@ -2520,6 +3044,8 @@ fn comment_list(doc: &pdfcraft_cos::Document) -> Vec<pdfcraft_render::Annotation
             modified: s.modified.map(|m| pdfcraft_render::pretty_date(&m)),
             name: s.name,
             in_reply_to: s.in_reply_to,
+            parent: s.parent,
+            grouped: s.grouped,
             rect: s.rect,
             color: s.color,
             index: s.index,
@@ -2528,8 +3054,12 @@ fn comment_list(doc: &pdfcraft_cos::Document) -> Vec<pdfcraft_render::Annotation
             locked: s.locked,
             intent: s.intent,
             fill_sign: s.fill_sign,
+            no_rotate: s.no_rotate,
+            points: s.points,
         })
-        .collect()
+        .collect();
+    pdfcraft_render::link_replies(&mut list);
+    list
 }
 
 /// Seconds to add to UTC for local time (0 where unknown).
@@ -2567,6 +3097,27 @@ fn renderer_password(bytes: &[u8]) -> String {
         Ok(text) => text.to_owned(),
         Err(_) => bytes.iter().map(|b| pdfcraft_cos::pdfdoc_char(*b)).collect(),
     }
+}
+
+/// The document as it may be written to a file (#3926, #3944): a copy without the values of text
+/// fields with the Password flag (or XFA `<passwordEdit/>` fields in the datasets), or `cos`
+/// itself when it holds none. ISO 32000-2 §12.7.5.3, Table 231 (a note to the Password flag):
+/// "it is imperative that PDF processors never store the value of the text field in the PDF file
+/// if this flag is set". The open document keeps them in memory.
+fn writable(cos: &pdfcraft_cos::Document) -> Result<std::borrow::Cow<'_, pdfcraft_cos::Document>, EditError> {
+    let has_form_pw = pdfcraft_forms::has_password_values(cos);
+    let has_xfa_pw = pdfcraft_xfa::has_password_values(cos);
+    if !has_form_pw && !has_xfa_pw {
+        return Ok(std::borrow::Cow::Borrowed(cos));
+    }
+    let mut copy = cos.clone();
+    if has_form_pw {
+        pdfcraft_forms::clear_password_values(&mut copy).map_err(|e| EditError::Write(e.to_string()))?;
+    }
+    if has_xfa_pw {
+        pdfcraft_xfa::clear_password_values(&mut copy).map_err(|e| EditError::Write(e.to_string()))?;
+    }
+    Ok(std::borrow::Cow::Owned(copy))
 }
 
 /// The last-resort guard (AGENTS.md §4): run `f`, turning a panic that escapes it into an error
@@ -2704,6 +3255,11 @@ pub struct Session {
     next_id: u64,
     /// Seconds since the Unix epoch, injected so saves are deterministic in tests.
     clock: Option<fn() -> i64>,
+    /// Seconds to add to UTC for local time, read from whoever knows the zone (a browser, say).
+    /// Separate from `clock` on purpose: `clock` alone is the test shortcut that takes the
+    /// injected time AS local time and zeroes the zone, so injecting only it leaves either the
+    /// local dates or the UTC ones wrong by the zone's offset.
+    utc_offset: Option<fn() -> i64>,
     /// Certificates trusted for signing (Acrobat: Trusted Certificates).
     trust: Arc<TrustStore>,
     /// Preferences ▸ JavaScript ▸ Enable Acrobat JavaScript, inverted (on by default).
@@ -2712,6 +3268,9 @@ pub struct Session {
     date_format: Option<String>,
     /// Preferences ▸ Date format ▸ Language, when not following the interface language.
     date_language: Option<String>,
+    /// What the XFA scripts' time limits are multiplied by (`None`: 1); see
+    /// [`Session::with_xfa_time_scale`].
+    xfa_time_scale: Option<u32>,
 }
 
 /// Immutable session state needed while a document is prepared away from its owning thread.
@@ -2720,6 +3279,7 @@ pub struct OpenContext {
     now: Option<i64>,
     js_off: bool,
     trust: Arc<TrustStore>,
+    xfa_time_scale: u32,
 }
 
 /// A fully prepared document that has not yet been registered in a session.
@@ -2859,6 +3419,62 @@ fn decode_data_file(bytes: &[u8]) -> Option<Result<String, String>> {
     }
 }
 
+/// Take the XFA out of `doc` and note what went with it: the packets, data no field showed,
+/// buttons that did nothing but run scripts, and fields whose value differs from the form's
+/// data (data PdfCraft could not read into them, now lost).
+fn strip_xfa(doc: &mut pdfcraft_cos::Document, cx: &mut EditCtx) -> Result<(), EditError> {
+    let fields = pdfcraft_forms::fields(doc);
+    let data = xfa_field_data(doc);
+    let differ = pdfcraft_xfa::read_values(doc, &data)
+        .into_iter()
+        .filter(|(name, value)| {
+            let Some(f) = fields.iter().find(|f| f.name == *name) else { return false };
+            match value {
+                pdfcraft_xfa::FieldData::Text(t) => f.value.join("\n") != *t && !t.trim().is_empty(),
+                pdfcraft_xfa::FieldData::Check(on) => f.value.is_empty() == *on,
+                pdfcraft_xfa::FieldData::Radio(sel) => f.value.first() != sel.as_ref(),
+                pdfcraft_xfa::FieldData::None => false,
+            }
+        })
+        .count();
+    let r = pdfcraft_xfa::strip(doc).map_err(|e| EditError::Write(e.to_string()))?;
+    cx.xfa_removed.extend(r.notes());
+    if differ > 0 {
+        cx.xfa_removed.push(format!(
+            "{differ} field(s) held a value other than the form's XFA data (data PdfCraft could not read into them); the data's version is gone"
+        ));
+    }
+    Ok(())
+}
+
+/// Keep the document's XFA state in step with its file after an edit: a script may have laid
+/// the form out again (rows added, subforms shown), an edit may have taken the XFA out
+/// (flattened, or made static), or an undo put it back.
+fn sync_xfa_state(doc: &mut Document) {
+    let Some(cos) = doc.editor.as_ref().map(|e| &e.cos) else { return };
+    match pdfcraft_xfa::existing_layout(cos) {
+        Some(report) => {
+            if doc.xfa.is_none() {
+                // Back after an undo: the XFA's own warnings apply again, the strip's don't.
+                doc.xfa_warnings.retain(|w| !w.starts_with(XFA_REMOVED_PREFIX));
+                if doc.xfa_template.is_none() && !doc.xfa_scripts_off {
+                    doc.xfa_template = xfa::template(cos);
+                }
+            }
+            doc.xfa = Some(report);
+        }
+        None => {
+            doc.xfa = None;
+            doc.xfa_template = None;
+            // Only what the strip said stays (the XFA's own warnings no longer apply).
+            doc.xfa_warnings.retain(|w| w.starts_with(XFA_REMOVED_PREFIX));
+        }
+    }
+}
+
+/// How the warnings of a strip start, so they can be told from the XFA's own.
+const XFA_REMOVED_PREFIX: &str = "XFA removed: ";
+
 /// Is this an XFA data file (an XDP, a datasets document, a data element or a data document),
 /// rather than XFDF, Acrobat's `<fields>` XML or a table? By its root element.
 fn is_xfa_data_file(text: &str) -> bool {
@@ -2890,6 +3506,8 @@ fn image_content_type(bytes: &[u8]) -> Option<&'static str> {
         pdfcraft_xfa::image::Kind::Jpeg => Some("image/jpeg"),
         pdfcraft_xfa::image::Kind::Png => Some("image/png"),
         pdfcraft_xfa::image::Kind::Gif => Some("image/gif"),
+        pdfcraft_xfa::image::Kind::Bmp => Some("image/bmp"),
+        pdfcraft_xfa::image::Kind::Tiff => Some("image/tiff"),
     }
 }
 
@@ -2898,7 +3516,8 @@ fn image_content_type(bytes: &[u8]) -> Option<&'static str> {
 /// fields take the data's values.
 fn xfa_after_data_change(doc: &mut pdfcraft_cos::Document, cx: &mut EditCtx, calculate: bool) -> Result<(), EditError> {
     if let Some(tpl) = cx.xfa.clone() {
-        let mut run = xfa::XfaRun { page_count: cx.pages, out: &mut cx.xfa_out, datasets: cx.xfa_datasets, ran_away: false };
+        let mut run =
+            xfa::XfaRun { page_count: cx.pages, out: &mut cx.xfa_out, datasets: cx.xfa_datasets, ran_away: false, time_scale: cx.xfa_time_scale };
         let r = guard(|| xfa::on_data_replaced(doc, &tpl, calculate, &mut run))
             .unwrap_or_else(|m| Err(format!("laying the form out again failed unexpectedly ({m})")));
         cx.xfa_datasets = run.datasets;
@@ -2941,9 +3560,14 @@ fn xfa_after_data_change(doc: &mut pdfcraft_cos::Document, cx: &mut EditCtx, cal
 fn xfa_values_from_datasets(doc: &mut pdfcraft_cos::Document) -> Result<Vec<String>, String> {
     let data = xfa_field_data(doc);
     let fields = pdfcraft_forms::fields(doc);
-    let mut changed = Vec::new();
+    // The first field of each name, as a lookup by name would find it.
+    let mut by_name = std::collections::HashMap::new();
+    for f in &fields {
+        by_name.entry(f.name.as_str()).or_insert(f);
+    }
+    let mut updates = Vec::new();
     for (name, value) in pdfcraft_xfa::read_values(doc, &data) {
-        let Some(f) = fields.iter().find(|f| f.name == name) else { continue };
+        let Some(f) = by_name.get(name.as_str()) else { continue };
         let new = match value {
             pdfcraft_xfa::FieldData::Text(t) if matches!(f.kind, pdfcraft_forms::FieldKind::Combo | pdfcraft_forms::FieldKind::List) => {
                 // Saved values, one per line for a multi-select list; shown text stands for
@@ -2961,18 +3585,19 @@ fn xfa_values_from_datasets(doc: &mut pdfcraft_cos::Document) -> Result<Vec<Stri
             pdfcraft_xfa::FieldData::Radio(sel) => (f.value.first() != sel.as_ref()).then_some(FieldValue::Radio(sel)),
             pdfcraft_xfa::FieldData::None => None,
         };
-        if let Some(v) = new
-            && pdfcraft_forms::set_value(doc, &name, &v).is_ok()
-        {
-            changed.push(name);
+        if let Some(v) = new {
+            updates.push((name, v));
         }
     }
-    Ok(changed)
+    // All at once: one by one, each value would read the whole form again, which took minutes
+    // on a form with thousands of fields.
+    let Ok(results) = pdfcraft_forms::set_values(doc, &updates) else { return Ok(Vec::new()) };
+    Ok(updates.into_iter().zip(results).filter(|(_, r)| r.is_ok()).map(|((name, _), _)| name).collect())
 }
 
 /// Validate the signature fields of `cos` (written as `bytes`).
-fn signatures_of(cos: &pdfcraft_cos::Document, bytes: &[u8], trust: &TrustStore, cache: &pdfcraft_sign::DigestCache) -> Arc<Vec<SignatureInfo>> {
-    Arc::new(pdfcraft_sign::pdf::list_cached(cos, bytes, trust, cache))
+fn signatures_of(cos: &pdfcraft_cos::Document, bytes: &[u8], trust: &TrustStore, cache: &pdfcraft_sign::DigestCache) -> Vec<SignatureInfo> {
+    pdfcraft_sign::pdf::list_cached(cos, bytes, trust, cache)
 }
 
 impl Session {
@@ -2984,6 +3609,39 @@ impl Session {
     pub fn with_clock(mut self, clock: fn() -> i64) -> Self {
         self.clock = Some(clock);
         self
+    }
+
+    /// Multiply the time an XFA form's scripts may take by `factor` (tests): the 3 s the
+    /// scripts of an opening or a change share, the 5 s of a click's, the 10 s the script
+    /// engine has to start, and each script's own 1 s or 3 s. A test that checks what the
+    /// scripts do passes a large factor, so that a busy machine does not stop them. On native
+    /// builds, 0 stops every script before it starts; the wasm build has no wall clock, so
+    /// there the factor has no effect.
+    pub fn with_xfa_time_scale(mut self, factor: u32) -> Self {
+        self.xfa_time_scale = Some(factor);
+        self
+    }
+
+    /// A real clock for a host that has neither a clock nor a time zone of its own (a
+    /// `wasm32-unknown-unknown` build: `now()` would be empty and `local_utc_offset()` is 0, so
+    /// Fill & Sign stamps 1 Jan 1970 and `/ModDate` is never written). `clock` is the UTC time in
+    /// seconds since the epoch; `utc_offset` is the local zone's seconds east of UTC, asked on every
+    /// use because the zone changes with the date (daylight saving). Unlike
+    /// [`Session::with_clock`], which is a test shortcut, nothing here is taken as local time.
+    pub fn with_wall_clock(mut self, clock: fn() -> i64, utc_offset: fn() -> i64) -> Self {
+        self.clock = Some(clock);
+        self.utc_offset = Some(utc_offset);
+        self
+    }
+
+    /// Seconds to add to UTC for the local time of this session: the injected zone, else 0 under
+    /// the test clock (which is already local), else the system's.
+    fn local_offset(&self) -> i64 {
+        match (self.utc_offset, self.clock) {
+            (Some(zone), _) => zone(),
+            (None, Some(_)) => 0,
+            (None, None) => local_utc_offset(),
+        }
     }
 
     /// Seconds since the Unix epoch from the session clock (0 when unknown).
@@ -3005,7 +3663,7 @@ impl Session {
     /// is taken as local time.
     /// A dynamic stamp's second line: "By Ada at 2:14 pm, Oct 02, 2026" (local time).
     pub fn stamp_by_line(&self, author: &str) -> String {
-        let offset = if self.clock.is_some() { 0 } else { local_utc_offset() };
+        let offset = self.local_offset();
         let d = self.now().map(|t| pdfcraft_cos::pdf_date(t + offset)).unwrap_or_default();
         let num = |a: usize, b: usize| d.get(a..b).and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
         let (y, mo, day, hh, mm) = (num(2, 6), num(6, 8), num(8, 10), num(10, 12), num(12, 14));
@@ -3016,7 +3674,7 @@ impl Session {
     }
 
     pub fn today(&self) -> (i64, u32, u32) {
-        let offset = if self.clock.is_some() { 0 } else { local_utc_offset() };
+        let offset = self.local_offset();
         self.now().map(|t| pdfcraft_cos::pdf_date(t + offset)).as_deref().and_then(parse_ymd).unwrap_or((1970, 1, 1))
     }
 
@@ -3036,7 +3694,7 @@ impl Session {
 
     /// Snapshot the session state that affects open-time scripts, dates and signature trust.
     pub fn open_context(&self) -> OpenContext {
-        OpenContext { now: self.now(), js_off: self.js_off, trust: self.trust.clone() }
+        OpenContext { now: self.now(), js_off: self.js_off, trust: self.trust.clone(), xfa_time_scale: self.xfa_time_scale.unwrap_or(1) }
     }
 
     /// Prepare a document without adding it to this session.
@@ -3080,10 +3738,10 @@ impl Session {
             Ok(info) => (info, password.map(str::to_owned)),
             Err(OpenError::WrongPassword) => {
                 let user = match &cos {
-                    Ok(Ok(d)) => d.security().and_then(|s| s.recovered_user_password()),
+                    Ok(Ok(d)) => recovered_render_password(d),
                     _ => None,
                 };
-                let user = renderer_password(&user.ok_or(OpenError::WrongPassword)?);
+                let user = user.ok_or(OpenError::WrongPassword)?;
                 (inspect(bytes.clone(), Some(&user))?, Some(user))
             }
             Err(e) => return Err(e),
@@ -3165,7 +3823,13 @@ impl Session {
                     let mut work = cos.clone();
                     let pages = info.pages.len();
                     let ran = guard(|| {
-                        let mut run = xfa::XfaRun { page_count: pages, out: &mut script_output, datasets: None, ran_away: false };
+                        let mut run = xfa::XfaRun {
+                            page_count: pages,
+                            out: &mut script_output,
+                            datasets: None,
+                            ran_away: false,
+                            time_scale: context.xfa_time_scale,
+                        };
                         let changes = xfa::on_open(&mut work, &tpl, &mut run);
                         if run.ran_away {
                             ran_away = true;
@@ -3201,6 +3865,31 @@ impl Session {
             },
             (_, cos) => (bytes, info, cos),
         };
+        // The catalog leads to no page, but the reader found pages by scanning: gather the page
+        // objects into a page tree as one more revision, or page edits address none of them
+        // (#1656). Kept only when the reader then shows the same pages, and never on a signed
+        // document, where writing the repair could rewrite the file under its signatures.
+        let (bytes, info, cos) = match cos {
+            Ok(Ok(cos)) if !info.pages.is_empty() && pdfcraft_organize::page_count(&cos).unwrap_or(0) == 0 => {
+                let mut work = cos.clone();
+                let signed = || pdfcraft_sign::pdf::list(&cos, &bytes, &context.trust).iter().any(|s| s.signed);
+                let rebuilt = match pdfcraft_organize::recover_page_tree(&mut work) {
+                    Ok(n) if n > 0 && !signed() => rebase(&work).ok().filter(|(_, i, _)| same_pages(&i.pages, &info.pages)),
+                    _ => None,
+                };
+                match rebuilt {
+                    Some((b, i, mut c)) => {
+                        for line in cos.repair_log() {
+                            c.note_repair(line.clone());
+                        }
+                        c.note_repair(format!("the page tree is missing; its {} pages were found by scanning the file", i.pages.len()));
+                        (b, i, Ok(Ok(c)))
+                    }
+                    None => (bytes, info, Ok(Ok(cos))),
+                }
+            }
+            cos => (bytes, info, cos),
+        };
         // XFA notes survive the document being re-read after edits.
         let xfa_warnings: Vec<String> = if info.xfa.is_some() { info.warnings.clone() } else { Vec::new() };
         let mut document = Self::build_document(&context.trust, name, path, bytes, info, cos, render_password, password, xfa);
@@ -3222,7 +3911,7 @@ impl Session {
         name: String,
         path: Option<String>,
         bytes: Arc<Vec<u8>>,
-        info: DocInfo,
+        mut info: DocInfo,
         cos: Result<Result<pdfcraft_cos::Document, pdfcraft_cos::CosError>, Box<dyn std::any::Any + Send>>,
         render_password: Option<String>,
         password: Option<&str>,
@@ -3232,13 +3921,18 @@ impl Session {
         let (mut editor, read_only_reason) = match cos {
             Ok(Ok(cos)) => {
                 let keys = Keys { render: render_password.clone(), reopen: password.map(str::to_owned) };
+                let saved = cos.bytes().clone();
                 (
                     Some(Editor {
                         cos,
+                        saved,
+                        saved_keys: keys.clone(),
+                        unsaved_file: false,
                         undo: Vec::new(),
                         redo: Vec::new(),
                         keys,
                         appearances: AppearanceCache::default(),
+                        field_appearances: pdfcraft_forms::FieldAppearanceCache::default(),
                         text_blocks: TextBlocksCache::default(),
                     }),
                     None,
@@ -3247,6 +3941,17 @@ impl Session {
             Ok(Err(e)) => (None, Some(e.to_string())),
             Err(_) => (None, Some("the document structure could not be read for editing".into())),
         };
+        let sig_cache = Arc::new(pdfcraft_sign::DigestCache::default());
+        let signatures = editor.as_ref().map(|e| signatures_of(&e.cos, &bytes, trust, &sig_cache)).unwrap_or_default();
+        // The inspection reads only `/Info`; a file stating its title or author only in XMP still
+        // shows them (#2373).
+        if let Some(e) = &editor {
+            for (field, value) in info_fields(&mut info, &e.cos) {
+                if field.is_none() {
+                    *field = value;
+                }
+            }
+        }
         let display = display_bytes(editor.as_mut(), &bytes);
         let renderer = RenderPool::new(display.clone(), render_threads(), config.clone());
         let (form, adopted) = editor
@@ -3268,16 +3973,6 @@ impl Session {
             };
             e.cos.note_repair(line);
         }
-        let (marks, added) = editor
-            .as_ref()
-            .map(|e| {
-                let scan = pdfcraft_edit::scan_markers(&e.cos);
-                (scan.marks, scan.added)
-            })
-            .unwrap_or_default();
-        let links = editor.as_ref().map(|e| pdfcraft_annot::links::list(&e.cos)).unwrap_or_default();
-        let sig_cache = Arc::new(pdfcraft_sign::DigestCache::default());
-        let signatures = editor.as_ref().map(|e| signatures_of(&e.cos, &bytes, trust, &sig_cache)).unwrap_or_default();
         Document {
             id: DocId(0),
             name,
@@ -3292,10 +3987,9 @@ impl Session {
             snapshot_generation: 0,
             read_only_reason,
             form: Arc::new(form),
-            marks,
-            added,
-            links,
-            signatures,
+            marker_scan: OnceLock::new(),
+            links: OnceLock::new(),
+            signatures: Arc::new(signatures),
             trust: trust.clone(),
             sig_cache,
             editor,
@@ -3319,14 +4013,17 @@ impl Session {
         let now = self.now();
         let today = self.today();
         let js_off = self.js_off;
+        let xfa_time_scale = self.xfa_time_scale.unwrap_or(1);
         let doc = self.doc_mut(id)?;
         doc.edit_notices.clear();
         let name = doc.name.clone();
         let is_xfa = doc.info.xfa.is_some();
+        let mut scope = scope_of(&edit);
         let mut cx = EditCtx::new(now, doc.generation ^ (id.0 << 48));
         if !js_off {
             cx.xfa = doc.xfa_template.clone();
         }
+        cx.xfa_time_scale = xfa_time_scale;
         cx.pages = doc.info.pages.len();
         cx.today = today;
         let reason = doc.read_only_reason.clone().unwrap_or_default();
@@ -3361,6 +4058,7 @@ impl Session {
             cx.js = Some(js::JsRunner::new(&next, &name));
         }
         cx.renamed_fields.clear();
+        cx.redaction_overlays.clear();
         // `next` is a copy: if the edit fails or crashes, the document is unchanged.
         guard(|| run_edit(&mut next, &edit, &mut cx))
             .unwrap_or_else(|m| Err(EditError::Invalid(format!("{} failed unexpectedly ({m}); the document was not changed", edit.label()))))?;
@@ -3369,7 +4067,7 @@ impl Session {
         if let Edit::ApplyRedactions { pages } = &edit {
             let marks: Vec<pdfcraft_redact::Mark> =
                 pdfcraft_redact::marks(&editor.cos).into_iter().filter(|m| pages.as_ref().is_none_or(|p| p.contains(&m.page))).collect();
-            guard(|| shown_under_redactions(&next, &marks, &doc.info.pages, doc.password.as_deref()))
+            guard(|| shown_under_redactions(&next, &marks, &cx.redaction_overlays, &doc.info.pages, doc.password.as_deref()))
                 .unwrap_or_else(|m| Err(EditError::Invalid(format!("{} failed unexpectedly ({m}); the document was not changed", edit.label()))))?;
         }
         // Renamed fields are said, not slipped in: a repair-log note (with the caveat that
@@ -3423,7 +4121,13 @@ impl Session {
             let mut reset = false;
             collect(&edit, &mut changed, &mut reset);
             if !changed.is_empty() || reset {
-                let mut run = xfa::XfaRun { page_count: cx.pages, out: &mut cx.xfa_out, datasets: cx.xfa_datasets, ran_away: false };
+                let mut run = xfa::XfaRun {
+                    page_count: cx.pages,
+                    out: &mut cx.xfa_out,
+                    datasets: cx.xfa_datasets,
+                    ran_away: false,
+                    time_scale: cx.xfa_time_scale,
+                };
                 // Every changed field's scripts, then the calculations once (after a reset,
                 // only those).
                 let ran = guard(|| xfa::on_changes(&mut next, &tpl, &changed, &mut run))
@@ -3442,11 +4146,24 @@ impl Session {
             xfa_notes = guard(|| xfa_sync_datasets(&mut next, tpl, datasets))
                 .unwrap_or_else(|m| Err(format!("writing the XFA data failed unexpectedly ({m})")))
                 .map_err(EditError::Write)?;
+            // Rebuilding from stale data would discard accepted widget values.
+            if xfa_notes.is_empty() {
+                let reflow = guard(|| xfa::relayout_changed_text(&mut next, tpl, &doc.form))
+                    .unwrap_or_else(|m| Err(format!("laying out the XFA text failed unexpectedly ({m})")))
+                    .map_err(EditError::Write)?;
+                if let Some(warnings) = reflow {
+                    xfa_notes.extend(warnings);
+                    // Layout replaces pages and widgets, even if the page count is unchanged.
+                    // Undo/redo must rebuild these too instead of refreshing only field values.
+                    scope = Scope::Full;
+                }
+            }
         }
         // Signed documents are only ever saved incrementally: an edit that needs a full rewrite
         // (applying redactions, changing security, sanitizing) would invalidate the signatures.
+        // So does any edit to a file rebuilt from object headers: it has no chain to append to.
         let rewrites = |c: &pdfcraft_cos::Document| c.full_save_required() || c.encryption_changed();
-        if signed && rewrites(&next) && !rewrites(&editor.cos) {
+        if signed && ((rewrites(&next) && !rewrites(&editor.cos)) || (next.is_modified() && next.revisions().is_empty())) {
             return Err(EditError::SignedRewrite(edit.label().to_string()));
         }
         // What this edit drew with `?` (a value or comment text its font can't draw, stored as
@@ -3459,7 +4176,6 @@ impl Session {
         let previous = std::mem::replace(&mut editor.cos, next);
         let keys = keys_after(&edit).unwrap_or_else(|| editor.keys.clone());
         let previous_keys = std::mem::replace(&mut editor.keys, keys);
-        let scope = scope_of(&edit);
         editor.undo.push((label, previous, previous_keys, scope));
         if editor.undo.len() > MAX_UNDO {
             editor.undo.remove(0);
@@ -3485,6 +4201,12 @@ impl Session {
         doc.dirty = true;
         doc.generation += 1;
         doc.edit_notices = notices;
+        if !cx.xfa_removed.is_empty() {
+            let removed: Vec<String> = cx.xfa_removed.iter().map(|n| format!("{XFA_REMOVED_PREFIX}{n}")).collect();
+            doc.xfa_warnings.retain(|w| w.starts_with(XFA_REMOVED_PREFIX));
+            note_warnings(&mut doc.xfa_warnings, &removed);
+            note_warnings(&mut doc.info.warnings, &removed);
+        }
         note_warnings(&mut doc.xfa_warnings, &xfa_notes);
         let notes = doc.xfa_warnings.clone();
         note_warnings(&mut doc.info.warnings, &notes);
@@ -3502,32 +4224,67 @@ impl Session {
 
     pub fn undo(&mut self, id: DocId) -> Result<Label, EditError> {
         let doc = self.doc_mut(id)?;
-        doc.edit_notices.clear();
         let editor = doc.editor.as_mut().ok_or(EditError::NothingToUndo)?;
         let (label, prev, keys, scope) = editor.undo.pop().ok_or(EditError::NothingToUndo)?;
         let current = std::mem::replace(&mut editor.cos, prev);
         let current_keys = std::mem::replace(&mut editor.keys, keys);
         editor.redo.push((label.clone(), current, current_keys, scope));
         Self::adopt_keys(doc);
-        Self::refresh_scoped(doc, scope).inspect_err(|_| Self::show_released(doc))?;
-        doc.dirty = true;
+        let refreshed = guard(|| Self::refresh_scoped(doc, scope)).unwrap_or_else(|m| Err(EditError::Reopen(m)));
+        if let Err(e) = refreshed {
+            if let Some(ed) = doc.editor.as_mut()
+                && let Some((label, current, current_keys, scope)) = ed.redo.pop()
+            {
+                let prev = std::mem::replace(&mut ed.cos, current);
+                let keys = std::mem::replace(&mut ed.keys, current_keys);
+                ed.undo.push((label, prev, keys, scope));
+            }
+            Self::adopt_keys(doc);
+            if !matches!(guard(|| Self::refresh(doc)), Ok(Ok(()))) {
+                Self::show_released(doc);
+            }
+            return Err(e);
+        }
+        doc.edit_notices.clear();
+        Self::sync_dirty(doc);
         doc.generation += 1;
         Ok(label)
     }
 
     pub fn redo(&mut self, id: DocId) -> Result<Label, EditError> {
         let doc = self.doc_mut(id)?;
-        doc.edit_notices.clear();
         let editor = doc.editor.as_mut().ok_or(EditError::NothingToRedo)?;
         let (label, next, keys, scope) = editor.redo.pop().ok_or(EditError::NothingToRedo)?;
         let current = std::mem::replace(&mut editor.cos, next);
         let current_keys = std::mem::replace(&mut editor.keys, keys);
         editor.undo.push((label.clone(), current, current_keys, scope));
         Self::adopt_keys(doc);
-        Self::refresh_scoped(doc, scope).inspect_err(|_| Self::show_released(doc))?;
-        doc.dirty = true;
+        let refreshed = guard(|| Self::refresh_scoped(doc, scope)).unwrap_or_else(|m| Err(EditError::Reopen(m)));
+        if let Err(e) = refreshed {
+            if let Some(ed) = doc.editor.as_mut()
+                && let Some((label, current, current_keys, scope)) = ed.undo.pop()
+            {
+                let next = std::mem::replace(&mut ed.cos, current);
+                let keys = std::mem::replace(&mut ed.keys, current_keys);
+                ed.redo.push((label, next, keys, scope));
+            }
+            Self::adopt_keys(doc);
+            if !matches!(guard(|| Self::refresh(doc)), Ok(Ok(()))) {
+                Self::show_released(doc);
+            }
+            return Err(e);
+        }
+        doc.edit_notices.clear();
+        Self::sync_dirty(doc);
         doc.generation += 1;
         Ok(label)
+    }
+
+    /// Unsaved when the working graph is not the last opened or saved file. Undo back to that
+    /// file is clean; undo past a later save is not, because the restored snapshot's own base
+    /// is an earlier revision.
+    fn sync_dirty(doc: &mut Document) {
+        doc.dirty = doc.editor.as_ref().is_some_and(|e| e.unsaved_file || e.cos.is_modified() || !Arc::ptr_eq(e.cos.bytes(), &e.saved));
     }
 
     /// Use the current state's password for viewing (protection edits change it).
@@ -3549,6 +4306,9 @@ impl Session {
         if scope == Scope::Content {
             return Self::refresh_content(doc, None);
         }
+        if scope == Scope::Links {
+            return Self::refresh_links(doc);
+        }
         // Metadata edits keep the renderer, which holds the working file anyway.
         if scope != Scope::Metadata {
             Self::release_working(doc);
@@ -3565,18 +4325,16 @@ impl Session {
             editor.cos.bytes().clone()
         };
         if scope == Scope::Metadata {
-            // Read the way the full inspection reads them (NULs and spaces trimmed, empty is
-            // none), so editing one entry doesn't change how the others display.
-            let info = |key| pdfcraft_organize::info(&editor.cos, key).map(|v| v.trim_matches('\0').trim().to_string()).filter(|v| !v.is_empty());
-            doc.info.title = info("Title");
-            doc.info.author = info("Author");
-            doc.info.subject = info("Subject");
-            doc.info.keywords = info("Keywords");
-            doc.info.creator = info("Creator");
-            doc.info.producer = info("Producer");
+            for (field, value) in info_fields(&mut doc.info, &editor.cos) {
+                *field = value;
+            }
+            doc.info.custom = pdfcraft_organize::custom_info(&editor.cos);
             doc.info.file_size = bytes.len();
+            #[cfg(test)]
+            check_refresh_panic();
             if !doc.signatures.is_empty() {
-                doc.signatures = signatures_of(&editor.cos, &bytes, &doc.trust, &doc.sig_cache);
+                let signatures = signatures_of(&editor.cos, &bytes, &doc.trust, &doc.sig_cache);
+                doc.signatures = Arc::new(signatures);
             }
             doc.bytes = bytes;
             return Ok(());
@@ -3586,7 +4344,11 @@ impl Session {
         let form = Arc::new(form);
         match scope {
             Scope::Metadata => return Ok(()),
-            Scope::Comments => doc.info.annotations = comment_list(&editor.cos),
+            Scope::Comments => {
+                doc.info.annotations = comment_list(&editor.cos);
+                // Link indexes are positions in /Annots, so comment insertion/deletion can move them.
+                doc.links = OnceLock::new();
+            }
             Scope::Form => {
                 // PERF: keystroke path, index once. A linear find per field is O(F^2);
                 // forms reach 10k fields.
@@ -3607,6 +4369,7 @@ impl Session {
                     }
                 }
             }
+            Scope::Links => return Self::refresh_links(doc),
             // Handled above; kept as a full refresh so the match stays total.
             Scope::Full => return Self::refresh(doc),
             // Handled above (content-only refresh); the arm keeps the match total.
@@ -3614,10 +4377,9 @@ impl Session {
         }
         doc.info.file_size = bytes.len();
         doc.form = form;
-        if !doc.signatures.is_empty() {
-            doc.signatures = signatures_of(&editor.cos, &bytes, &doc.trust, &doc.sig_cache);
-        }
+        let signatures = if doc.signatures.is_empty() { Vec::new() } else { signatures_of(&editor.cos, &bytes, &doc.trust, &doc.sig_cache) };
         doc.display = display_bytes(Some(editor), &bytes);
+        doc.signatures = Arc::new(signatures);
         doc.renderer = RenderPool::new(doc.display.clone(), render_threads(), doc.config.clone());
         doc.bytes = bytes;
         Ok(())
@@ -3626,10 +4388,22 @@ impl Session {
     /// Which derived lists a content-only edit can change: added content (`None`, from
     /// undo/redo, re-reads both: always correct, rarely paid).
     fn content_refresh_lists(edit: Option<&Edit>) -> (bool, bool) {
+        if let Some(Edit::Batch { edits, .. }) = edit {
+            // A batch of content edits (from a script, say) changes what its parts change.
+            return edits.iter().fold((false, false), |(added, marks), part| {
+                let (a, m) = Self::content_refresh_lists(Some(part));
+                (added || a, marks || m)
+            });
+        }
         let touches_added = edit.is_none_or(|e| {
             matches!(
                 e,
-                Edit::AddText { .. } | Edit::AddImage { .. } | Edit::UpdateContent { .. } | Edit::DeleteContent { .. } | Edit::ReplaceImage { .. }
+                Edit::AddText { .. }
+                    | Edit::AddImage { .. }
+                    | Edit::UpdateContent { .. }
+                    | Edit::DeleteContent { .. }
+                    | Edit::ReplaceImage { .. }
+                    | Edit::PasteContent { .. }
             ) || matches!(e, Edit::MoveObjects { objects, .. } if objects.iter().any(|o| o.kind == ObjectKind::Added))
         });
         let touches_marks = edit.is_none_or(|e| {
@@ -3646,13 +4420,8 @@ impl Session {
     /// appearances are kept: content edits leave every annotation dictionary alone.
     fn refresh_content(doc: &mut Document, edit: Option<&Edit>) -> Result<(), EditError> {
         Self::release_working(doc);
+        sync_xfa_state(doc);
         let Some(editor) = doc.editor.as_mut() else { return Ok(()) };
-        // A script may have laid an XFA form out again (rows added, subforms shown).
-        if doc.xfa.is_some()
-            && let Some(report) = pdfcraft_xfa::existing_layout(&editor.cos)
-        {
-            doc.xfa = Some(report);
-        }
         let bytes = if editor.cos.is_modified() {
             Arc::new(write_incremental(&editor.cos, &SaveOptions::default()).map_err(|e| EditError::Write(e.to_string()))?)
         } else {
@@ -3661,17 +4430,13 @@ impl Session {
         // The edit must still leave a file the viewer can open; anything else rolls back above.
         pdfcraft_render::check_pages(bytes.clone(), doc.password.as_deref(), doc.info.pages.len()).map_err(|e| EditError::Reopen(e.to_string()))?;
         let (touches_added, touches_marks) = Self::content_refresh_lists(edit);
-        if touches_added {
-            doc.added = pdfcraft_edit::list_added(&editor.cos);
-        }
-        if touches_marks {
-            doc.marks = pdfcraft_edit::marks_present(&editor.cos);
+        if touches_added || touches_marks {
+            doc.marker_scan = OnceLock::new();
         }
         doc.info.file_size = bytes.len();
-        if !doc.signatures.is_empty() {
-            doc.signatures = signatures_of(&editor.cos, &bytes, &doc.trust, &doc.sig_cache);
-        }
+        let signatures = if doc.signatures.is_empty() { Vec::new() } else { signatures_of(&editor.cos, &bytes, &doc.trust, &doc.sig_cache) };
         doc.display = display_bytes(Some(editor), &bytes);
+        doc.signatures = Arc::new(signatures);
         doc.renderer = RenderPool::new(doc.display.clone(), render_threads(), doc.config.clone());
         doc.bytes = bytes;
         doc.fonts_stale = true;
@@ -3692,6 +4457,8 @@ impl Session {
         doc.renderer = RenderPool::new_inline(Arc::new(Vec::new()), doc.config.clone());
         doc.display = original.clone();
         doc.bytes = original;
+        #[cfg(test)]
+        check_refresh_panic();
     }
 
     /// After a refresh failed: draw the display bytes it left (the original, once released),
@@ -3702,19 +4469,23 @@ impl Session {
 
     /// Rebuild working bytes, inspection and renderer from the current edit state.
     fn refresh(doc: &mut Document) -> Result<(), EditError> {
+        Self::refresh_with_indexes(doc, true, true)
+    }
+
+    /// Reinspect a link edit while preserving the page-content marker scan cache.
+    fn refresh_links(doc: &mut Document) -> Result<(), EditError> {
+        Self::refresh_with_indexes(doc, false, true)
+    }
+
+    fn refresh_with_indexes(doc: &mut Document, invalidate_markers: bool, invalidate_links: bool) -> Result<(), EditError> {
         // A full refresh may follow structural or annotation changes: cached appearances
         // may be stale, so they are rebuilt below.
         if let Some(editor) = doc.editor.as_mut() {
             editor.appearances.clear();
         }
         Self::release_working(doc);
+        sync_xfa_state(doc);
         let Some(editor) = doc.editor.as_mut() else { return Ok(()) };
-        // A script may have laid an XFA form out again (rows added, subforms shown).
-        if doc.xfa.is_some()
-            && let Some(report) = pdfcraft_xfa::existing_layout(&editor.cos)
-        {
-            doc.xfa = Some(report);
-        }
         let bytes = if editor.cos.is_modified() {
             Arc::new(write_incremental(&editor.cos, &SaveOptions::default()).map_err(|e| EditError::Write(e.to_string()))?)
         } else {
@@ -3729,17 +4500,27 @@ impl Session {
             }
         }
         note_warnings(&mut info.warnings, &doc.xfa_warnings);
+        // As in `build_document`: the inspection reads only `/Info`, so fields stated only in XMP
+        // are filled in again after every full refresh.
+        for (field, value) in info_fields(&mut info, &editor.cos) {
+            if field.is_none() {
+                *field = value;
+            }
+        }
         doc.info = info;
         doc.fonts_stale = false;
         let mut form = pdfcraft_forms::fields(&editor.cos);
         xfa::mark_script_buttons(&editor.cos, &mut form);
         doc.form = Arc::new(form);
-        let marker_scan = pdfcraft_edit::scan_markers(&editor.cos);
-        doc.marks = marker_scan.marks;
-        doc.added = marker_scan.added;
-        doc.links = pdfcraft_annot::links::list(&editor.cos);
-        doc.signatures = signatures_of(&editor.cos, &bytes, &doc.trust, &doc.sig_cache);
+        if invalidate_markers {
+            doc.marker_scan = OnceLock::new();
+        }
+        if invalidate_links {
+            doc.links = OnceLock::new();
+        }
+        let signatures = signatures_of(&editor.cos, &bytes, &doc.trust, &doc.sig_cache);
         doc.display = display_bytes(Some(editor), &bytes);
+        doc.signatures = Arc::new(signatures);
         doc.renderer = RenderPool::new(doc.display.clone(), render_threads(), doc.config.clone());
         doc.bytes = bytes;
         Ok(())
@@ -3747,14 +4528,37 @@ impl Session {
 
     /// The bytes to write for Save: an incremental update of the file as opened/last saved,
     /// with `/ModDate` stamped. Call `mark_saved` after writing them successfully.
+    ///
+    /// A file whose cross-reference data had to be rebuilt is written in full even when nothing
+    /// was edited: its bytes as opened are the damaged file, and this save is how the repair the
+    /// user was told about reaches the disk (#1937). Not a signed one: a full rewrite would
+    /// break its signatures, so with no edits it keeps its bytes, damage and all.
     pub fn save_bytes(&self, id: DocId) -> Result<Arc<Vec<u8>>, EditError> {
         let doc = self.get(id).ok_or(EditError::NoDocument)?;
         let Some(editor) = doc.editor.as_ref() else { return Ok(doc.bytes.clone()) };
-        if !editor.cos.is_modified() {
-            return Ok(editor.cos.bytes().clone());
+        let on_saved = Arc::ptr_eq(editor.cos.bytes(), &editor.saved);
+        if !editor.cos.is_modified() && on_saved && (!editor.cos.reconstructed() || doc.is_signed()) {
+            return Ok(editor.saved.clone());
         }
-        let opts = SaveOptions { mod_date: self.now().map(pdfcraft_cos::pdf_date), ..SaveOptions::default() };
-        guard(|| write_incremental(&editor.cos, &opts)).map_err(EditError::Write)?.map(Arc::new).map_err(|e| EditError::Write(e.to_string()))
+        // What the user removed again before saving (a cleared redaction mark) stays out of the file.
+        let opts = SaveOptions { mod_date: self.now().map(pdfcraft_cos::pdf_date), drop_unlinked: true, ..SaveOptions::default() };
+        // A restored snapshot can be based on an earlier revision. Append to the last saved
+        // file so that revision stays in the chain. A full rewrite (redaction, new encryption,
+        // a reconstructed file) still writes the current graph on its own.
+        let rewrite = editor.cos.full_save_required() || editor.cos.encryption_changed() || editor.cos.revisions().is_empty();
+        let cos = writable(&editor.cos)?;
+        guard(|| {
+            if on_saved || rewrite {
+                write_incremental(&cos, &opts)
+            } else {
+                let mut base = pdfcraft_cos::Document::open_with_password(editor.saved.clone(), editor.saved_keys.reopen.as_deref())?;
+                base.overlay_changes_from(&cos)?;
+                write_incremental(&base, &opts)
+            }
+        })
+        .map_err(EditError::Write)?
+        .map(Arc::new)
+        .map_err(|e| EditError::Write(e.to_string()))
     }
 
     /// A compact, garbage-collected rewrite (Save As ▸ "Optimized" / Reduce File Size groundwork).
@@ -3765,7 +4569,8 @@ impl Session {
         }
         let editor = doc.editor.as_ref().ok_or_else(|| EditError::ReadOnly(doc.read_only_reason.clone().unwrap_or_default()))?;
         let opts = SaveOptions { mod_date: self.now().map(pdfcraft_cos::pdf_date), ..SaveOptions::default() };
-        guard(|| write_full(&editor.cos, &opts)).map_err(EditError::Write)?.map(Arc::new).map_err(|e| EditError::Write(e.to_string()))
+        let cos = writable(&editor.cos)?;
+        guard(|| write_full(&cos, &opts)).map_err(EditError::Write)?.map(Arc::new).map_err(|e| EditError::Write(e.to_string()))
     }
 
     /// Check that `bytes`, from [`Self::save_bytes`] or [`Self::save_full_bytes`], reopen as this
@@ -3785,8 +4590,19 @@ impl Session {
         if let Some(editor) = doc.editor.as_mut() {
             // An encrypted file needs the password it is protected with now (the owner
             // password when known, so saving never downgrades this session's rights).
-            editor.cos = pdfcraft_cos::Document::open_with_password(bytes.clone(), editor.keys.reopen.as_deref())
-                .map_err(|e| EditError::Reopen(e.to_string()))?;
+            let keys = editor.keys.clone();
+            // The saved file carries no Password-field values (#3943, #3944); the open document keeps them.
+            let typed = pdfcraft_forms::password_values(&editor.cos);
+            editor.cos =
+                pdfcraft_cos::Document::open_with_password(bytes.clone(), keys.reopen.as_deref()).map_err(|e| EditError::Reopen(e.to_string()))?;
+            pdfcraft_forms::restore_password_values(&mut editor.cos, &typed).map_err(|e| EditError::Reopen(e.to_string()))?;
+            if !typed.is_empty() && doc.info.xfa.is_some() {
+                let mut datasets = None;
+                let _ = xfa_sync_datasets(&mut editor.cos, doc.xfa_template.as_deref(), &mut datasets);
+            }
+            editor.saved = bytes;
+            editor.saved_keys = keys;
+            editor.unsaved_file = false;
         }
         if let Some(p) = path {
             doc.name = std::path::Path::new(&p).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| p.clone());
@@ -3835,10 +4651,10 @@ impl Session {
     pub fn revert(&mut self, id: DocId) -> Result<(), EditError> {
         let doc = self.doc_mut(id)?;
         let editor = doc.editor.as_mut().ok_or_else(|| EditError::ReadOnly(doc.read_only_reason.clone().unwrap_or_default()))?;
-        let base = editor.cos.bytes().clone();
-        // The saved file opens with the passwords of the state that was saved: try the current
-        // ones, then each earlier state's.
-        let mut candidates = vec![editor.keys.clone()];
+        let base = editor.saved.clone();
+        // The saved file opens with the passwords it was saved with. The current snapshot may
+        // be an older revision (undo past that save), so its own base is not the saved file.
+        let mut candidates = vec![editor.saved_keys.clone(), editor.keys.clone()];
         candidates.extend(editor.undo.iter().rev().map(|s| s.2.clone()));
         candidates.push(Keys::default());
         let (cos, keys) = candidates
@@ -3850,7 +4666,7 @@ impl Session {
         editor.undo.clear();
         editor.redo.clear();
         Self::adopt_keys(doc);
-        doc.dirty = false;
+        Self::sync_dirty(doc);
         doc.generation += 1;
         Self::refresh(doc).inspect_err(|_| Self::show_released(doc))
     }
@@ -3869,6 +4685,15 @@ impl Session {
         let at = self.docs.iter().position(|d| d.id == new_id).ok_or_else(|| OpenError::Invalid("the new version was not kept".into()))?;
         let mut doc = self.docs.remove(at);
         doc.id = id;
+        // How the document is shown is the reader's, not the file's: reading colours and hidden
+        // comments stay as they were (#3443). `open` built the renderer with the defaults.
+        if let Some(old) = self.docs.get(old)
+            && (doc.config.reading_colors != old.config.reading_colors || doc.config.hide_comments != old.config.hide_comments)
+        {
+            doc.config.reading_colors = old.config.reading_colors;
+            doc.config.hide_comments = old.config.hide_comments;
+            doc.renderer = RenderPool::new(doc.display.clone(), render_threads(), doc.config.clone());
+        }
         // Caches keyed by the edit generation (edit lines, images, measurements) must see a new
         // one; there is nothing new to autosave.
         doc.generation = generation + 1;
@@ -3975,7 +4800,7 @@ impl Session {
         }
         guard(|| match format {
             DataFormat::Xfdf => Ok(pdfcraft_xfdf::export_xfdf(&cos, comments, fields, &doc.name).into_bytes()),
-            DataFormat::Fdf => Ok(pdfcraft_xfdf::export_fdf(&cos, comments, fields, &doc.name)),
+            DataFormat::Fdf => pdfcraft_xfdf::export_fdf(&cos, comments, fields, &doc.name).map_err(|e| e.to_string()),
             DataFormat::Xml | DataFormat::Xdp if xfa => {
                 pdfcraft_xfa::export_data(&cos, format == DataFormat::Xdp, &doc.name).map(String::into_bytes).map_err(|e| e.to_string())
             }
@@ -3991,13 +4816,58 @@ impl Session {
         if !doc.allows_printing() {
             return Err(EditError::NotPermitted("printing"));
         }
-        let cos = match doc.editor.as_ref() {
+        // Table 22, bit 12 clear: only a low-level representation may be printed, so the pages
+        // always go as pictures, at no more than the low resolution.
+        let low_res = doc.permissions().is_some_and(|p| !p.print_high_quality()).then(|| print::Raster {
+            dpi: settings.raster.map_or(LOW_RESOLUTION_PRINT_DPI, |r| r.dpi.min(LOW_RESOLUTION_PRINT_DPI)),
+            grayscale: settings.raster.is_some_and(|r| r.grayscale),
+        });
+        // Print as image: the pages used become pictures first, then the picture document is
+        // imposed in their place (its page k is the k-th distinct source page used).
+        if let Some(raster) = low_res.as_ref().or(settings.raster.as_ref()) {
+            let mut distinct: Vec<usize> = Vec::new();
+            for &p in &settings.pages {
+                if !distinct.contains(&p) {
+                    distinct.push(p);
+                }
+            }
+            let bytes = print_raster::rasterize(doc, &distinct, raster, settings.content).map_err(EditError::Print)?;
+            let pictures = pdfcraft_cos::Document::open(Arc::new(bytes)).map_err(|e| EditError::Print(e.to_string()))?;
+            let remapped = print::Settings {
+                pages: settings.pages.iter().map(|p| distinct.iter().position(|d| d == p).unwrap_or(0)).collect(),
+                content: print::Content::Document,
+                raster: None,
+                ..settings.clone()
+            };
+            return pdfcraft_print::impose(&pictures, &remapped).map_err(|e| EditError::Print(e.to_string()));
+        }
+        let mut cos = match doc.editor.as_ref() {
             Some(e) => e.cos.clone(),
             None => {
                 pdfcraft_cos::Document::open_with_password(doc.bytes.clone(), doc.password.as_deref()).map_err(|e| EditError::Write(e.to_string()))?
             }
         };
+        // #3046: the layers print as they are shown. Once the Layers panel (or a set-layer
+        // action) has changed one, the print copy's default configuration says which are on, so a
+        // hidden layer stays off on paper too; untouched, the document's own configuration prints.
+        if !doc.config.layers.is_empty() {
+            set_default_layer_state(&mut cos, &doc.info.layers);
+        }
         pdfcraft_print::impose(&cos, settings).map_err(|e| EditError::Print(e.to_string()))
+    }
+
+    /// For each page, whether its text mostly runs bottom-to-top ([`pdfcraft_print::text_reads_up`]);
+    /// only `pages` are read, the others are `false`.
+    pub fn print_text_up(&self, id: DocId, pages: &[usize]) -> Vec<bool> {
+        let Some(doc) = self.get(id) else { return Vec::new() };
+        let cos = match doc.editor.as_ref() {
+            Some(e) => e.cos.clone(),
+            None => match pdfcraft_cos::Document::open_with_password(doc.bytes.clone(), doc.password.as_deref()) {
+                Ok(c) => c,
+                Err(_) => return Vec::new(),
+            },
+        };
+        (0..doc.info.pages.len()).map(|i| pages.contains(&i) && pdfcraft_print::text_reads_up(&cos, i)).collect()
     }
 
     /// Combine whole files, in order, into new PDF bytes (one bookmark per file).
@@ -4062,7 +4932,7 @@ impl Session {
     pub fn combine_field_conflicts(&self, sources: &[CombineSource], passwords: &[Option<&str>]) -> Vec<Vec<(String, String)>> {
         let docs: Vec<Option<pdfcraft_cos::Document>> =
             sources.iter().enumerate().map(|(i, (n, b, _))| open_source_with(n, b, passwords.get(i).copied().flatten()).ok()).collect();
-        let refs: Vec<&pdfcraft_cos::Document> = docs.iter().filter_map(|d| d.as_ref()).collect();
+        let refs: Vec<&pdfcraft_cos::Document> = docs.iter().filter_map(Option::as_ref).collect();
         let mut opened = pdfcraft_organize::combine_field_conflicts(&refs).into_iter();
         // One preview per source, in step with it: a file that cannot be opened has none.
         docs.iter().map(|d| if d.is_some() { opened.next().unwrap_or_default() } else { Default::default() }).collect()
@@ -4193,7 +5063,7 @@ impl Session {
         let mut cuts = Vec::new();
         let mut used = 0usize;
         for p in 0..n {
-            let size = self.write_new(&pdfcraft_organize::extract_pages(src, &[p])?)?.len();
+            let size = self.write_unchecked(&pdfcraft_organize::extract_pages(src, &[p])?)?.len();
             if used > 0 && used + size > max_bytes {
                 cuts.push(p);
                 used = 0;
@@ -4236,7 +5106,7 @@ impl Session {
                         ]
                     })
                     .filter(|r| {
-                        !doc.links.iter().any(|l| l.page == page && l.rect[0] < r[2] && r[0] < l.rect[2] && l.rect[1] < r[3] && r[1] < l.rect[3])
+                        !doc.links().iter().any(|l| l.page == page && l.rect[0] < r[2] && r[0] < l.rect[2] && l.rect[1] < r[3] && r[1] < l.rect[3])
                     })
                     .collect();
                 if !rects.is_empty() {
@@ -4253,7 +5123,17 @@ impl Session {
         let doc = self.get(id)?;
         if let Some(editor) = doc.editor.as_ref() {
             let page = pdfcraft_organize::bookmark_page(&editor.cos, offset, limit);
-            let rows = page.bookmarks.into_iter().map(|b| BookmarkRow { path: b.path, title: b.title, open: b.open, page: b.page }).collect();
+            let rows = page
+                .bookmarks
+                .into_iter()
+                .map(|b| {
+                    let view = b.view.map_or_else(Default::default, |(kind, numbers)| {
+                        let numbers: Vec<Option<f32>> = numbers.iter().map(|n| n.map(|n| n as f32)).collect();
+                        pdfcraft_render::DestView::from_operands(Some(&kind), &numbers)
+                    });
+                    BookmarkRow { path: b.path, title: b.title, open: b.open, page: b.page, view, color: b.color, italic: b.italic, bold: b.bold }
+                })
+                .collect();
             return Some(BookmarkPage { rows, next: page.next, truncated: false });
         }
         let all = outline_rows(&doc.info.outline);
@@ -4280,6 +5160,9 @@ impl Session {
         let id = self.open(name, None, bytes, None)?;
         if let Some(d) = self.docs.iter_mut().find(|d| d.id == id) {
             d.dirty = true;
+            if let Some(e) = d.editor.as_mut() {
+                e.unsaved_file = true;
+            }
             // Unsaved work with no edit yet still needs its first recovery snapshot.
             d.generation += 1;
         }
@@ -4291,9 +5174,28 @@ impl Session {
         doc.editor.as_ref().map(|e| &e.cos).ok_or_else(|| EditError::ReadOnly(doc.read_only_reason.clone().unwrap_or_default()))
     }
 
+    /// A new file (Combine, Extract, Split, Create) as bytes, checked like a save before anyone
+    /// writes it (#1698, #2166): it reopens, and shows the pages it was built from.
     fn write_new(&self, doc: &pdfcraft_cos::Document) -> Result<Arc<Vec<u8>>, EditError> {
+        let bytes = self.write_unchecked(doc)?;
+        let expected = pdfcraft_organize::page_count(doc)?;
+        pdfcraft_cos::Document::open(bytes.clone()).map_err(|e| EditError::Reopen(e.to_string()))?;
+        pdfcraft_render::check_pages(bytes.clone(), None, expected).map_err(|e| EditError::Reopen(e.to_string()))?;
+        Ok(bytes)
+    }
+
+    /// [`Self::write_new`] without the check, for bytes nobody writes: measuring a part's size.
+    /// Like a save, a new file never carries a typed Password-field value (#3926): Extract and
+    /// Split copy the fields of the pages they take.
+    fn write_unchecked(&self, doc: &pdfcraft_cos::Document) -> Result<Arc<Vec<u8>>, EditError> {
         let opts = SaveOptions { mod_date: self.now().map(pdfcraft_cos::pdf_date), ..SaveOptions::default() };
-        write_full(doc, &opts).map(Arc::new).map_err(|e| EditError::Write(e.to_string()))
+        let doc = writable(doc)?;
+        write_full(&doc, &opts).map(Arc::new).map_err(|e| EditError::Write(e.to_string()))
+    }
+
+    /// Whether a changed document still needs a recovery snapshot. This does not consume it.
+    pub fn has_pending_autosave(&self) -> bool {
+        self.docs.iter().any(|d| d.dirty && d.generation != d.snapshot_generation)
     }
 
     /// Documents with unsaved changes made since the last call: their current working file,
@@ -4302,12 +5204,24 @@ impl Session {
         let mut out = Vec::new();
         for d in &mut self.docs {
             if d.dirty && d.generation != d.snapshot_generation {
+                // The working bytes hold typed Password-field values (#3926, #3944): a recovery file
+                // is written from a copy without them, and none is written if that copy fails.
+                let bytes =
+                    match d.editor.as_ref().filter(|e| pdfcraft_forms::has_password_values(&e.cos) || pdfcraft_xfa::has_password_values(&e.cos)) {
+                        Some(e) => match writable(&e.cos)
+                            .and_then(|c| write_incremental(&c, &SaveOptions::default()).map_err(|e| EditError::Write(e.to_string())))
+                        {
+                            Ok(b) => Arc::new(b),
+                            Err(_) => continue,
+                        },
+                        None => d.bytes.clone(),
+                    };
                 d.snapshot_generation = d.generation;
                 out.push(RecoverySnapshot {
                     doc: d.id,
                     name: d.name.clone(),
                     path: d.path.clone(),
-                    bytes: d.bytes.clone(),
+                    bytes,
                     encrypted: d.info.encrypted || d.editor.as_ref().is_some_and(|e| e.cos.security().is_some()),
                 });
             }
@@ -4321,6 +5235,9 @@ impl Session {
         if let Some(d) = self.docs.iter_mut().find(|d| d.id == id) {
             d.path = path;
             d.dirty = true;
+            if let Some(e) = d.editor.as_mut() {
+                e.unsaved_file = true;
+            }
             d.generation += 1;
             d.snapshot_generation = d.generation; // its bytes are already in the recovery store
         }
@@ -4351,6 +5268,22 @@ impl Session {
         }
         use_layer_choices(doc);
         true
+    }
+
+    /// Show each layer as the file opens (Acrobat's Layers ▸ Reset to Initial Visibility). Returns
+    /// `true` if any layer changed; callers must drop cached rasters and text for the document,
+    /// as for [`Self::set_layer_visible`].
+    pub fn reset_layers(&mut self, id: DocId) -> bool {
+        let Some(doc) = self.docs.iter_mut().find(|d| d.id == id) else { return false };
+        let mut changed = false;
+        for l in &mut doc.info.layers {
+            changed |= l.visible != l.initial;
+            l.visible = l.initial;
+        }
+        if changed {
+            use_layer_choices(doc);
+        }
+        changed
     }
 
     /// Hide or show every comment on the page (Acrobat's Comments ▸ Hide all comments). Form
@@ -4384,6 +5317,12 @@ impl Session {
         Some(self.get(id)?.config.reading_colors)
     }
 
+    /// How the document's pages are drawn for viewing: its password and view settings (layer
+    /// visibility, hidden comments, reading colours). `None` when no such document is open.
+    pub fn render_config(&self, id: DocId) -> Option<RenderConfig> {
+        Some(self.get(id)?.config.clone())
+    }
+
     /// Acrobat's Summarize Comments ("Comments only" layout): a new PDF listing every comment
     /// with its number, author, type, date, text and replies, grouped by page.
     pub fn summarize_comments(&self, id: DocId, sort: SummarySort) -> Result<Arc<Vec<u8>>, EditError> {
@@ -4397,20 +5336,26 @@ impl Session {
         &self.trust.certs
     }
 
-    /// Replace the trusted certificates and revalidate every open document's signatures.
+    /// Replace the trusted certificates, revalidate every open document's signatures,
+    /// and rebuild its display copy and renderer to match (working file untouched,
+    /// generation/dirty unchanged: trust alone is not an edit).
     pub fn set_trusted_certificates(&mut self, certs: Vec<pdfcraft_sign::Certificate>) {
         self.trust = Arc::new(TrustStore { certs });
         for doc in &mut self.docs {
             doc.trust = self.trust.clone();
-            if let Some(e) = doc.editor.as_ref() {
-                doc.signatures = signatures_of(&e.cos, &doc.bytes, &doc.trust, &doc.sig_cache);
-            }
+            let Some(editor) = doc.editor.as_mut() else { continue };
+            // Keep verdict refresh and renderer refresh together. Viewer caches are
+            // invalidated by the UI trust path; trust alone changes no document artwork.
+            let signatures = if doc.signatures.is_empty() { Vec::new() } else { signatures_of(&editor.cos, &doc.bytes, &doc.trust, &doc.sig_cache) };
+            doc.display = display_bytes(Some(editor), &doc.bytes);
+            doc.signatures = Arc::new(signatures);
+            doc.renderer = RenderPool::new(doc.display.clone(), render_threads(), doc.config.clone());
         }
     }
 
     /// The signing time as a PDF date in local time with its offset (`D:…+02'00'`).
     pub fn signing_date(&self) -> String {
-        let offset = if self.clock.is_some() { 0 } else { local_utc_offset() };
+        let offset = self.local_offset();
         let local = pdfcraft_cos::pdf_date(self.now().unwrap_or(0) + offset);
         let stamp = local.trim_end_matches('Z');
         if offset == 0 {
@@ -4430,7 +5375,9 @@ impl Session {
         if opts.date.is_empty() {
             opts.date = self.signing_date();
         }
-        Ok(Arc::new(pdfcraft_sign::sign(&editor.cos, id, &opts)?))
+        // A typed Password-field value is not signed into the file (#3926), as it isn't saved.
+        let cos = writable(&editor.cos)?;
+        Ok(Arc::new(pdfcraft_sign::sign(&cos, id, &opts)?))
     }
 
     /// [`Session::sign`], embedding an RFC 3161 signature timestamp (PAdES B-T) produced by
@@ -4447,7 +5394,11 @@ impl Session {
         if opts.date.is_empty() {
             opts.date = self.signing_date();
         }
-        Ok(Arc::new(pdfcraft_sign::sign_with_timestamp(&editor.cos, id, &opts, tsa)?))
+        let cos = writable(&editor.cos)?;
+        let signed = Arc::new(pdfcraft_sign::sign_with_timestamp(&cos, id, &opts, tsa)?);
+        // Checked like a save before anyone writes it (#2166).
+        self.check_save(doc, &signed)?;
+        Ok(signed)
     }
 
     /// Append a standalone document timestamp (RFC 3161, `/ETSI.RFC3161`) covering the file's
@@ -4456,7 +5407,10 @@ impl Session {
         let d = self.get(doc).ok_or(EditError::NoDocument)?;
         let editor = d.editor.as_ref().ok_or_else(|| EditError::ReadOnly(d.read_only_reason.clone().unwrap_or_default()))?;
         let date = if date.is_empty() { self.signing_date() } else { date };
-        Ok(Arc::new(pdfcraft_sign::timestamp_document(&editor.cos, tsa, &date)?))
+        let cos = writable(&editor.cos)?;
+        let stamped = Arc::new(pdfcraft_sign::timestamp_document(&cos, tsa, &date)?);
+        self.check_save(doc, &stamped)?;
+        Ok(stamped)
     }
 
     /// Embed revocation evidence into the catalog's `/DSS` with `/VRI` entries per signature
@@ -4464,7 +5418,10 @@ impl Session {
     pub fn embed_ltv(&self, doc: DocId, evidence: &pdfcraft_sign::dss::Evidence) -> Result<Arc<Vec<u8>>, EditError> {
         let d = self.get(doc).ok_or(EditError::NoDocument)?;
         let editor = d.editor.as_ref().ok_or_else(|| EditError::ReadOnly(d.read_only_reason.clone().unwrap_or_default()))?;
-        Ok(Arc::new(pdfcraft_sign::dss::embed(&editor.cos, evidence)?))
+        let cos = writable(&editor.cos)?;
+        let embedded = Arc::new(pdfcraft_sign::dss::embed(&cos, evidence)?);
+        self.check_save(doc, &embedded)?;
+        Ok(embedded)
     }
 
     /// Record that the signed file `bytes` was saved (to `path`): like [`Session::mark_saved`],
@@ -4517,7 +5474,30 @@ fn embed_image(
     name: &str,
     bytes: &[u8],
 ) -> Result<(pdfcraft_cos::ObjRef, (f64, f64)), pdfcraft_create::CreateError> {
-    pdfcraft_create::image_xobject(doc, name, &upright_image::upright(bytes))
+    pdfcraft_create::image_xobject(doc, name, bytes)
+}
+
+/// The largest box of `w`:`h` shape inside `rect`, centred in it: a stamp's picture keeps its
+/// shape in a box of any other shape. A box that is already that shape (to within rounding) is
+/// kept exactly, so callers that size it themselves get their box back. An empty or non-finite
+/// box, or a picture with no size, is returned as it is, for the annotation's own check to refuse.
+fn fit_picture(rect: [f64; 4], w: f64, h: f64) -> [f64; 4] {
+    if !rect.iter().all(|v| v.is_finite()) {
+        return rect;
+    }
+    let rect = [rect[0].min(rect[2]), rect[1].min(rect[3]), rect[0].max(rect[2]), rect[1].max(rect[3])];
+    let (bw, bh) = (rect[2] - rect[0], rect[3] - rect[1]);
+    let usable = |v: f64| v.is_finite() && v > 0.0;
+    if !(usable(bw) && usable(bh) && usable(w) && usable(h)) {
+        return rect;
+    }
+    let k = (bw / w).min(bh / h);
+    let (fw, fh) = (w * k, h * k);
+    if (fw - bw).abs() <= bw * 1e-9 && (fh - bh).abs() <= bh * 1e-9 {
+        return rect;
+    }
+    let (cx, cy) = (rect[0] + bw / 2.0, rect[1] + bh / 2.0);
+    [cx - fw / 2.0, cy - fh / 2.0, cx + fw / 2.0, cy + fh / 2.0]
 }
 
 /// Bring a mark's picture into `doc`: a PDF page as a form XObject, or an image.
@@ -4607,24 +5587,30 @@ pub fn comment_kind(a: &pdfcraft_render::Annotation) -> &str {
 /// pop-ups; the number is the comment's position on its page.
 pub fn comment_summary(name: &str, all: &[pdfcraft_render::Annotation], sort: SummarySort) -> String {
     use std::fmt::Write;
-    let top: Vec<&pdfcraft_render::Annotation> = all.iter().filter(|a| a.in_reply_to.is_none() && a.state.is_none()).collect();
+    let top: Vec<&pdfcraft_render::Annotation> = all.iter().filter(|a| a.is_comment()).collect();
+    // Each reply under the annotation its `/IRT` points at, in document order, gathered once.
+    type Children<'a> = std::collections::HashMap<(usize, usize), Vec<&'a pdfcraft_render::Annotation>>;
+    let mut children = Children::new();
+    for r in all.iter().filter(|r| r.state.is_none()) {
+        if let Some(parent) = r.parent {
+            children.entry(parent).or_default().push(r);
+        }
+    }
     // Write a comment's replies, indenting each level. A reply to a reply keeps its `/IRT` on the
     // direct parent, so following one level would leave the deeper replies out of the summary.
-    fn write_replies(out: &mut String, all: &[pdfcraft_render::Annotation], parent: &str, depth: usize) {
+    fn write_replies(out: &mut String, children: &Children<'_>, parent: &pdfcraft_render::Annotation, depth: usize) {
         use std::fmt::Write;
         if depth > 64 {
             return;
         }
-        for r in all.iter().filter(|r| r.state.is_none() && r.in_reply_to.as_deref() == Some(parent)) {
+        for r in children.get(&(parent.page, parent.index)).into_iter().flatten() {
             let indent = "    ".repeat(depth + 1);
             let _ =
                 writeln!(out, "{indent}Author: {}  Subject: Reply  Date: {}", r.author.as_deref().unwrap_or(""), r.modified.as_deref().unwrap_or(""));
             for line in r.contents.as_deref().unwrap_or("").lines() {
                 let _ = writeln!(out, "{indent}{line}");
             }
-            if let Some(nm) = r.name.as_deref() {
-                write_replies(out, all, nm, depth + 1);
-            }
+            write_replies(out, children, r, depth + 1);
         }
     }
     let mut numbered: Vec<(usize, &pdfcraft_render::Annotation)> = Vec::new();
@@ -4663,9 +5649,7 @@ pub fn comment_summary(name: &str, all: &[pdfcraft_render::Annotation], sort: Su
         if let Some(c) = a.contents.as_deref().filter(|c| !c.is_empty()) {
             let _ = writeln!(out, "{c}");
         }
-        if let Some(nm) = a.name.as_deref() {
-            write_replies(&mut out, all, nm, 0);
-        }
+        write_replies(&mut out, &children, a, 0);
         out.push('\n');
     }
     out

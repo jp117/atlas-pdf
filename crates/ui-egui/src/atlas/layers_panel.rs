@@ -25,7 +25,7 @@ pub(crate) fn show(ui: &mut egui::Ui, t: &Tokens, id: DocId, info: &DocInfo, cha
     }
     let input: Vec<LayerInput<'_>> = info.layers.iter().map(|l| LayerInput { id: l.id, name: &l.name, visible: l.visible }).collect();
     let model = LayerModel::new(&input);
-    let memory = egui::Id::new(("atlas-layers", id.0));
+    let memory = egui::Id::unique(("atlas-layers", id.0));
     let mut state: ViewState = ui.data(|d| d.get_temp(memory)).unwrap_or_default();
     let mut action: Option<Owned> = None;
 
@@ -105,7 +105,7 @@ fn group_ui(
     default_open: bool,
     action: &mut Option<Owned>,
 ) {
-    let id = egui::Id::new(("atlas-layer-group", key.0, key.1, &group.title, key.2));
+    let id = egui::Id::unique(("atlas-layer-group", key.0, key.1, &group.title, key.2));
     let visibility = model.visibility_of(&group.layers);
     egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, default_open)
         .show_header(ui, |ui| {
@@ -160,7 +160,7 @@ fn eye(ui: &mut egui::Ui, t: &Tokens, visibility: Visibility) -> egui::Response 
         Visibility::Off => ("eye-off", t.text_faint),
     };
     crate::icons::paint(ui, Rect::from_center_size(rect.center(), vec2(16.0, 16.0)), icon, 16.0, tint);
-    resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Checkbox, true, visibility != Visibility::Off, "Layer visibility"));
+    resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::CheckBox, true, visibility != Visibility::Off, "Layer visibility"));
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 

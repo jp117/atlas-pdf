@@ -16,7 +16,7 @@ use pdfcraft_atlas::takeoff::{Listing, MarkText, Status};
 use pdfcraft_engine::{DocId, Document, Edit};
 
 pub(crate) use layers_panel::{apply as apply_layers, show as layers_panel};
-pub(crate) use takeoff_panel::show as takeoff_panel;
+pub(crate) use takeoff_panel::side_panel as takeoff_side_panel;
 pub(crate) use takeoff_tool::page;
 
 /// Atlas's per-window state.
@@ -82,25 +82,10 @@ fn pick_tool(app: &mut PdfCraftApp, status: Status) {
     open_panel(app);
 }
 
-/// Show the Takeoff panel. The first time it shares the Inspector's place as a tab rather than
-/// halving the drawing; after that it comes back wherever it was last put.
+/// Show the Takeoff panel in the side panel's place, as the rail's Takeoff button does.
 fn open_panel(app: &mut PdfCraftApp) {
-    use crate::docking::Panel;
-    use serde_json::json;
-    if app.docking.layout.contains(&Panel::Takeoff) {
-        return;
-    }
-    let first_time = !app.docking.hidden.iter().any(|(panel, _)| *panel == Panel::Takeoff);
-    let mut steps = vec![json!({"operation": "open", "panel": "takeoff"})];
-    if first_time && app.docking.layout.contains(&Panel::Inspector) {
-        steps.push(json!({"operation": "move", "panel": "takeoff", "target": "inspector", "zone": "center", "before": "inspector"}));
-        steps.push(json!({"operation": "activate", "panel": "takeoff"}));
-    }
-    for step in steps {
-        if let Err(error) = crate::docking::command(app, false, &step) {
-            app.notify(error);
-            return;
-        }
+    if app.right != Some(crate::RightPanel::Takeoff) {
+        app.choose_right_panel(Some(crate::RightPanel::Takeoff));
     }
 }
 
@@ -169,7 +154,7 @@ pub(crate) fn quick_bar_tools(app: &mut PdfCraftApp, ui: &mut egui::Ui, t: &crat
             t.text_faint,
         );
         let label = status.label();
-        resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Button, true, selected, label));
+        resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, true, selected, label));
         if crate::theme::hand(resp).on_hover_text(format!("{label} (key {})", status.hotkey())).clicked() {
             pick_tool(app, status);
         }

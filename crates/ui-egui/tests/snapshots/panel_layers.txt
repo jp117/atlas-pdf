@@ -1,0 +1,16 @@
+Label = "Layers"
+Label = "1"
+Button "Close" [off]
+Button "Layer options" [off]
+TextInput
+Button "Electrical focus"
+Button "Show all"
+RadioButton "By trade" [on]
+RadioButton "By drawing" [off]
+Unknown
+CheckBox "Layer visibility" [on]
+Label = "General & annotation"
+Label = "1"
+Button "Only"
+CheckBox "Layer visibility" [on]
+Label = "Draft notes"

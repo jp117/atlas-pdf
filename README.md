@@ -36,7 +36,8 @@ Box equipment on a drawing to record whether Atlas quotes it:
   boxes.
 - Click a box (without dragging) to select it: `Delete` removes it, and `1`/`2`/`3` re-mark
   it. With nothing selected, `1`/`2`/`3` pick the tool.
-- The **Takeoff** panel lists every mark sheet by sheet with a count per status. You can filter
+- The **Takeoff** panel (the side panel a box tool opens, or **Takeoff** on the rail at the
+  right edge) lists every mark sheet by sheet with a count per status. You can filter
   it and edit a mark's status and label, and **Export takeoff as CSV** saves the list (page,
   sheet, status, label, author).
 
@@ -132,7 +133,7 @@ code is kept out of upstream files so merges stay cheap:
 Upstream files carry one- to three-line hooks, each marked `Atlas fork`:
 - `engine/src/lib.rs`: the takeoff edits and SHX filtering;
 - `render/src/{text,inspect,lib}.rs`;
-- `ui-egui/src/{lib,canvas,chrome,control,editing,docking,panels}.rs`;
+- `ui-egui/src/{lib,canvas,chrome,control,editing,panels}.rs`;
 - `automation/src/{lib,tools}.rs`;
 - `xtask/src/layers.rs`.
 
@@ -151,17 +152,29 @@ Rules for Atlas code:
 ### Taking changes from upstream
 
 Our `main` is Atlas PDF's own line of development, not a copy of PdfCraft. PdfCraft is a
-fetch-only `upstream` remote that we take changes from when they don't conflict with Atlas work:
+fetch-only `upstream` remote that we merge from on a branch, never straight into `main`:
 
 ```sh
+git remote add upstream https://github.com/storytold/pdfcraft && git remote set-url --push upstream DISABLE
 git fetch upstream
 git merge-tree --write-tree --name-only main upstream/main   # exit 0: merges cleanly; otherwise lists the conflicts
-git merge upstream/main                                       # only when it merges cleanly
+git switch -c chore/merge-upstream-<date> && git merge upstream/main
 ```
 
-When a merge would conflict, leave it. To take one particular fix whose commit applies cleanly,
-use `git cherry-pick <commit>`. After taking anything from upstream, run the quality gates on the
-crates it touched and `cargo test -p pdfcraft-ui-egui` before pushing.
+A merge that conflicts is still worth doing: PdfCraft gains hundreds of fixes a day, and a fork
+that skips them only gets harder to merge. Resolve each conflict by re-applying what Atlas changed
+(`git diff $(git merge-base main upstream/main) main -- <file>`) onto upstream's version, and keep:
+- **Updates from Atlas PDF's releases.** `apps/pdfcraft/src/updates.rs`, `ui-egui/src/updates.rs`
+  and `atlas_install.rs` stay ours; upstream's craft-update installs PdfCraft's releases.
+- **The brand.** No ArtCraft logo, Discord or community card; names and folders come from
+  `pdfcraft_atlas::brand` (upstream code added since the last merge may hard-code "PdfCraft").
+- **Atlas's image decoding and sampling patches** in `vendor/hayro*` (vendor/README.md lists them),
+  renumbered after upstream's own when both add patches.
+- **Every `Atlas fork` hook**: compare `git grep -c "Atlas fork"` on `main` and on the merge.
+
+To take one particular fix whose commit applies cleanly, use `git cherry-pick <commit>`. After
+taking anything from upstream, run the quality gates on the crates it touched and
+`cargo test -p pdfcraft-ui-egui -p pdfcraft-render -p pdfcraft-atlas` before pushing.
 
 ## Next
 

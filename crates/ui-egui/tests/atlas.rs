@@ -69,6 +69,32 @@ fn keys_re_mark_the_selected_box_in_box_mode_and_delete_removes_it() {
     assert!(marks(&h).is_empty());
 }
 
+/// The Takeoff panel is one of the side panels: picking a takeoff tool shows it in the side
+/// panel's place, the rail's Takeoff button brings it back, and `panel` names it.
+#[test]
+fn a_takeoff_tool_opens_the_takeoff_side_panel_and_the_rail_reopens_it() {
+    use pdfcraft_ui_egui::RightPanel;
+    let mut h = harness();
+    h.state_mut().choose_right_panel(None);
+    h.run_steps(2);
+    h.get_by_label(Status::Included.label()).click();
+    h.run_steps(3);
+    assert_eq!(h.state().right, Some(RightPanel::Takeoff));
+    h.get_by_label("No takeoff marks yet.");
+
+    h.state_mut().choose_right_panel(Some(RightPanel::Comments));
+    h.run_steps(2);
+    assert!(h.query_by_label("No takeoff marks yet.").is_none());
+    h.get_by_label("Takeoff").click();
+    h.run_steps(3);
+    assert_eq!(h.state().right, Some(RightPanel::Takeoff));
+    h.get_by_label("No takeoff marks yet.");
+
+    h.state_mut().choose_right_panel(None);
+    h.state_mut().set_option("panel", "takeoff").unwrap();
+    assert_eq!(h.state().right, Some(RightPanel::Takeoff));
+}
+
 /// Comments belong to the quote, not to boxes: a yellow box goes on in one drag, like the others.
 #[test]
 fn a_yellow_box_is_added_in_one_drag_without_a_comment_prompt() {
