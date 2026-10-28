@@ -131,11 +131,19 @@ code is kept out of upstream files so merges stay cheap:
 | `crates/automation/src/atlas.rs`          | `takeoff_*` tools                                                 |
 
 Upstream files carry one- to three-line hooks, each marked `Atlas fork`:
-- `engine/src/lib.rs`: the takeoff edits and SHX filtering;
-- `render/src/{text,inspect,lib}.rs`;
-- `ui-egui/src/{lib,canvas,chrome,control,editing,panels}.rs`;
-- `automation/src/{lib,tools}.rs`;
+- `engine/src/{edit,edit/labels,edit/run,history,document,comments,error}.rs`: the takeoff edits
+  and SHX filtering;
+- `render/src/{lib,text/device,inspect/annotations}.rs` and `render/src/raster{,/pool}.rs` (the
+  shared image cache);
+- `annot/src/appearance{,/symbols}.rs`: the see-through fill of takeoff boxes;
+- `ui-egui/src/{lib,state,app,canvas,canvas/bars,chrome,menus,editing,dialogs}.rs`,
+  `ui-egui/src/app/{control,keys}.rs`, `ui-egui/src/control/host.rs` and
+  `ui-egui/src/panels/right.rs`;
+- `automation/src/{lib,dispatch,tools}.rs`;
 - `xtask/src/layers.rs`.
+
+The Atlas menu is part of upstream's menu bar (`ui-egui/src/menus.rs`, from craft-menu), so on
+macOS it is in the native menu bar too.
 
 Search for `Atlas fork` to find them all.
 
@@ -164,7 +172,7 @@ git switch -c chore/merge-upstream-<date> && git merge upstream/main
 A merge that conflicts is still worth doing: PdfCraft gains hundreds of fixes a day, and a fork
 that skips them only gets harder to merge. Resolve each conflict by re-applying what Atlas changed
 (`git diff $(git merge-base main upstream/main) main -- <file>`) onto upstream's version, and keep:
-- **Updates from Atlas PDF's releases.** `apps/pdfcraft/src/updates.rs`, `ui-egui/src/updates.rs`
+- **Updates from Atlas PDF's releases.** `apps/pdfcraft/src/updates.rs`, `ui-egui/src/platform/updates.rs`
   and `atlas_install.rs` stay ours; upstream's craft-update installs PdfCraft's releases.
 - **The brand.** No ArtCraft logo, Discord or community card; names and folders come from
   `pdfcraft_atlas::brand` (upstream code added since the last merge may hard-code "PdfCraft").

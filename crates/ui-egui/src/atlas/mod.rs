@@ -1,8 +1,8 @@
 //! Atlas fork: the interface for Atlas Switch's takeoff workflow.
 //!
 //! Everything Atlas adds to the window lives here, reached from a handful of one-line hooks in
-//! the upstream files (`lib.rs`, `canvas.rs`, `chrome.rs`, `editing.rs`, `control.rs`), so the
-//! fork rebases cleanly. Strings are plain English on purpose: `tl!` literals would have to be
+//! the upstream files (`state.rs`, `canvas.rs`, `chrome.rs`, `menus.rs`, `editing.rs`,
+//! `panels/right.rs`, `app/control.rs`, `app/keys.rs`), so the fork merges cleanly. Strings are plain English on purpose: `tl!` literals would have to be
 //! added to every upstream translation catalogue.
 
 mod layers_panel;
@@ -103,26 +103,64 @@ fn restatus_selected(app: &mut PdfCraftApp, i: usize, status: Status) -> Option<
     Some(Edit::UpdateTakeoffMark { page, index, text })
 }
 
-/// The Atlas menu: the takeoff tools.
-pub(crate) fn menu(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
-    ui.label(egui::RichText::new("Takeoff").small().weak());
-    for status in Status::ALL {
-        let text = egui::RichText::new(format!("■  {}", status.label())).color(takeoff_tool::color(status));
-        let button = egui::Button::new(text).shortcut_text(status.hotkey().to_string()).selected(app.quick_tool == QuickTool::Takeoff(status));
-        if ui.add_enabled(app.active.is_some(), button).clicked() {
-            pick_tool(app, status);
-            ui.close();
-        }
+/// The Atlas menu's commands: a takeoff tool, the Takeoff panel and the CSV export.
+const PANEL_COMMAND: &str = "atlas.takeoff_panel";
+const EXPORT_COMMAND: &str = "atlas.export_csv";
+
+fn menu_command(status: Status) -> &'static str {
+    match status {
+        Status::Included => "atlas.takeoff.included",
+        Status::IncludedWithComments => "atlas.takeoff.included_with_comments",
+        Status::Excluded => "atlas.takeoff.excluded",
     }
-    ui.separator();
-    if ui.button("Takeoff panel").clicked() {
+}
+
+/// Whether `id` is one of the Atlas menu's commands.
+pub(crate) fn is_menu_command(id: &str) -> bool {
+    id == PANEL_COMMAND || id == EXPORT_COMMAND || Status::ALL.into_iter().any(|s| menu_command(s) == id)
+}
+
+/// The Atlas menu: the takeoff tools, the Takeoff panel and the CSV export. The keys go in the
+/// labels, not as shortcuts: a plain digit as a native menu's key equivalent would take it from
+/// text fields.
+pub(crate) fn menu() -> craft_menu::Menu {
+    use craft_menu::{Item, Node};
+    let mut tools: Vec<Node> = Status::ALL
+        .into_iter()
+        .map(|status| Item::new(menu_command(status), format!("{} (key {})", status.label(), status.hotkey())).radio(false).into())
+        .collect();
+    tools.push(Node::Separator);
+    tools.push(Item::new(PANEL_COMMAND, "Takeoff panel").into());
+    tools.push(Item::new(EXPORT_COMMAND, "Export takeoff as CSV…").into());
+    craft_menu::Menu::new("Atlas", vec![Node::submenu("Takeoff", tools)])
+}
+
+/// An Atlas menu item's state, or `None` for another menu's command.
+pub(crate) fn menu_state(app: &PdfCraftApp, command: &craft_menu::CommandRef) -> Option<craft_menu::ItemState> {
+    let id = command.id.as_str();
+    if !is_menu_command(id) {
+        return None;
+    }
+    let tool = Status::ALL.into_iter().find(|s| menu_command(*s) == id);
+    Some(craft_menu::ItemState {
+        enabled: id == PANEL_COMMAND || app.active.is_some(),
+        checked: tool.map(|s| app.quick_tool == QuickTool::Takeoff(s)),
+    })
+}
+
+/// Run an Atlas menu command; `false` for another menu's.
+pub(crate) fn run_menu_command(app: &mut PdfCraftApp, command: &craft_menu::CommandRef) -> bool {
+    let id = command.id.as_str();
+    if let Some(status) = Status::ALL.into_iter().find(|s| menu_command(*s) == id) {
+        pick_tool(app, status);
+    } else if id == PANEL_COMMAND {
         open_panel(app);
-        ui.close();
-    }
-    if ui.add_enabled(app.active.is_some(), egui::Button::new("Export takeoff as CSV…")).clicked() {
+    } else if id == EXPORT_COMMAND {
         takeoff_panel::export_csv(app);
-        ui.close();
+    } else {
+        return false;
     }
+    true
 }
 
 /// The takeoff tool a control-channel name picks (`takeoff-included`, …).
