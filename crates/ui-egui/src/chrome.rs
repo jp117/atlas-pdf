@@ -181,23 +181,14 @@ pub fn tab_strip(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
                             }
                             // Dragging a tab moves it (#1537): a line marks the gap it will land
                             // in, and releasing the button drops it there.
-                            // Atlas fork: one dragged well away from the strip opens in a new
-                            // window instead (`atlas::tab_window`).
-                            let name = dragged.filter(|(_, released)| !released).and_then(|(from, _)| crate::canvas::tab_label(app, from));
                             if let Some((from, released)) = dragged
-                                && let Some((pos, torn)) = crate::atlas::tab_window::dragging(ui.ctx(), full, name.as_deref())
+                                && let Some(x) = ui.ctx().pointer_latest_pos().map(|p| p.x)
                             {
-                                let x = pos.x;
                                 let to = drop_index(&slots, from, x);
                                 if released {
                                     if close.is_none() && action.is_none() {
-                                        match app.views.get(from).map(|v| v.id) {
-                                            Some(id) if torn => app.move_tab_to_new_window(id, crate::atlas::tab_window::placement_at(ui.ctx(), pos)),
-                                            _ => app.move_tab(from, to),
-                                        }
+                                        app.move_tab(from, to);
                                     }
-                                } else if torn {
-                                    ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
                                 } else {
                                     drag_x = Some(x);
                                     ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);

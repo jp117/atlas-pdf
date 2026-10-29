@@ -6,7 +6,6 @@
 //! added to every upstream translation catalogue.
 
 mod layers_panel;
-pub(crate) mod tab_window;
 mod takeoff_panel;
 mod takeoff_tool;
 #[cfg(not(target_arch = "wasm32"))]
@@ -32,8 +31,6 @@ pub(crate) struct AtlasState {
     /// Updating an installed copy.
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) updates: updates::UpdateState,
-    /// Starts the window a dragged-out tab opens in; tests record it instead.
-    launcher: Option<tab_window::Launcher>,
 }
 
 impl AtlasState {

@@ -70,14 +70,6 @@ It also:
 
 `Page N` sheet containers from combined files stay on through every preset.
 
-### Tabs in their own windows
-
-Drag a document tab down out of the tab strip (or off either side of the window) and let go: it
-opens in a new Atlas PDF window at the same page, and its tab closes in the old one. A tip at the
-pointer says when letting go will do that. A tab with unsaved changes is saved first, because the
-new window is a separate Atlas PDF that reads the file from disk. A document that was never saved
-asks where to save it, and cancelling leaves the tab where it was.
-
 ### Takeoff for agents
 
 `pdfcraft-cli run` and the MCP server gain `takeoff_list`, `takeoff_add`, `takeoff_update` and
@@ -135,7 +127,7 @@ code is kept out of upstream files so merges stay cheap:
 | ----------------------------------------- | ----------------------------------------------------------------- |
 | `crates/atlas` (`pdfcraft-atlas`, L4)     | Layer grouping and takeoff marks: pure rules with unit tests     |
 | `crates/render/src/shx.rs`                | SHX text as page text                                             |
-| `crates/ui-egui/src/atlas/`               | Takeoff tool, Takeoff panel, Layers panel, Atlas menu, tab windows |
+| `crates/ui-egui/src/atlas/`               | Takeoff tool, Takeoff panel, Layers panel, Atlas menu             |
 | `crates/automation/src/atlas.rs`          | `takeoff_*` tools                                                 |
 
 Upstream files carry one- to three-line hooks, each marked `Atlas fork`:
@@ -148,7 +140,6 @@ Upstream files carry one- to three-line hooks, each marked `Atlas fork`:
   `ui-egui/src/app/{control,keys}.rs`, `ui-egui/src/control/host.rs` and
   `ui-egui/src/panels/right.rs`;
 - `automation/src/{lib,dispatch,tools}.rs`;
-- `apps/pdfcraft/src/main.rs`: `--tab-window`, the window a dragged-out tab opens in;
 - `xtask/src/layers.rs`.
 
 The Atlas menu is part of upstream's menu bar (`ui-egui/src/menus.rs`, from craft-menu), so on

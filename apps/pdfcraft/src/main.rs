@@ -14,10 +14,6 @@
 //! `--new-window` opens a window of its own. Without it, on Windows, a launch that only names files
 //! hands them to the PdfCraft already running, where they open as tabs (`single_instance`).
 //!
-//! Atlas fork: `--tab-window W,H[,X,Y]` is the window a tab dragged out of the strip opens in: a
-//! new window of that size and place, without last session's files, that leaves the saved window
-//! size and place to the window it came from.
-//!
 //! `--control <file>` enables the UI control channel (off by default): the app listens on a random
 //! loopback port and writes `{"port", "token", "pid"}` to `<file>` (owner-only permissions). The
 //! app doesn't start if it can't.
@@ -232,7 +228,6 @@ fn main() -> eframe::Result {
     let mut control_file: Option<String> = None;
     let mut create_images = false;
     let mut new_window = false;
-    let mut tab_window = None;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -242,11 +237,6 @@ fn main() -> eframe::Result {
             "--control" => control_file = args.next(),
             "--create-images" => create_images = true,
             "--new-window" => new_window = true,
-            // Atlas fork: a tab dragged out of another window (`atlas::tab_window`).
-            "--tab-window" => {
-                tab_window = args.next().and_then(|v| pdfcraft_ui_egui::TabWindowPlacement::parse(&v));
-                new_window = true;
-            }
             flag if flag.starts_with("--") => {
                 let value = args.next().unwrap_or_default();
                 options.push((flag.trim_start_matches("--").to_string(), value));
@@ -286,7 +276,7 @@ fn main() -> eframe::Result {
         single_instance::Claim::Alone => None,
     };
     let choice = renderer_choice(std::env::var("PDFCRAFT_RENDERER").ok().as_deref());
-    let launch = Launch { files, options, control_file, create_images, integrated, window_controls, tab_window };
+    let launch = Launch { files, options, control_file, create_images, integrated, window_controls };
     // Finder, Open With and the Dock deliver files as Apple events, not arguments; catch the one
     // that launched us as well as later ones. Lives until the event loop returns.
     #[cfg(target_os = "macos")]
@@ -296,7 +286,7 @@ fn main() -> eframe::Result {
     let first = if choice == RendererChoice::Gl { eframe::Renderer::Glow } else { eframe::Renderer::Wgpu };
     let result = eframe::run_native(
         pdfcraft_atlas::brand::APP_NAME,
-        launch_options(&launch, first),
+        native_options(launch.integrated, launch.window_controls.is_some(), first),
         app_creator(
             launch.clone(),
             Rc::clone(&started),
@@ -314,7 +304,7 @@ fn main() -> eframe::Result {
             log::error!("the GPU renderer (wgpu) didn't start: {e}. Starting with OpenGL instead; set PDFCRAFT_RENDERER=gl to skip wgpu.");
             eframe::run_native(
                 pdfcraft_atlas::brand::APP_NAME,
-                launch_options(&launch, eframe::Renderer::Glow),
+                native_options(launch.integrated, launch.window_controls.is_some(), eframe::Renderer::Glow),
                 app_creator(
                     launch,
                     started,
@@ -390,14 +380,6 @@ fn native_options(integrated: bool, app_frame: bool, renderer: eframe::Renderer)
     native
 }
 
-/// [`native_options`] for this launch. Atlas fork: a dragged-out tab's window doesn't save its
-/// size and place, which are the main window's to keep.
-fn launch_options(launch: &Launch, renderer: eframe::Renderer) -> eframe::NativeOptions {
-    let mut native = native_options(launch.integrated, launch.window_controls.is_some(), renderer);
-    native.persist_window = launch.tab_window.is_none();
-    native
-}
-
 /// What the command line asked for, kept so a second run (with OpenGL) can start the same way.
 #[derive(Clone)]
 struct Launch {
@@ -408,8 +390,6 @@ struct Launch {
     integrated: bool,
     /// The window buttons the app draws, when the desktop leaves the frame to it.
     window_controls: Option<pdfcraft_ui_egui::window_controls::Layout>,
-    /// Atlas fork: the window a dragged-out tab opens in (`--tab-window`).
-    tab_window: Option<pdfcraft_ui_egui::TabWindowPlacement>,
 }
 
 /// Whether the window is a native Wayland one (not X11 or XWayland).
@@ -430,13 +410,9 @@ fn app_creator<'a>(
     instance: Option<&'a single_instance::Server>,
     #[cfg(target_os = "macos")] apple_events: &'a apple_events::AppleEvents,
 ) -> eframe::AppCreator<'a> {
-    let Launch { files, options, control_file, create_images, integrated, window_controls, tab_window } = launch;
+    let Launch { files, options, control_file, create_images, integrated, window_controls } = launch;
     Box::new(move |cc| {
         started.set(true);
-        // Atlas fork: eframe opened the window where the last one closed; move it under the pointer.
-        for command in tab_window.iter().flat_map(|t| t.commands()) {
-            cc.egui_ctx.send_viewport_cmd(command);
-        }
         let mut app = PdfCraftApp::new();
         // First start (or settings from before Units existed): the region's unit.
         app.units = pdfcraft_ui_egui::units::Unit::system();
@@ -510,11 +486,8 @@ fn app_creator<'a>(
             }
         } else {
             // With the preference on, last session's files come back first; files named on
-            // the command line open after them, in front (#442). Atlas fork: not in the window
-            // a dragged-out tab opens in, which shows that tab alone.
-            if tab_window.is_none() {
-                app.reopen_last_files(&files);
-            }
+            // the command line open after them, in front (#442).
+            app.reopen_last_files(&files);
             for f in files {
                 app.open_path(&f);
             }
