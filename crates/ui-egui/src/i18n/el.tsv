@@ -2563,3 +2563,11 @@ animation effects	Off	Ανενεργά
 	Rotate the selected pages clockwise	Περιστροφή των επιλεγμένων σελίδων δεξιόστροφα
 	Extract the selected pages…	Εξαγωγή των επιλεγμένων σελίδων…
 	Delete the selected pages	Διαγραφή των επιλεγμένων σελίδων
+# Several windows (M14): the Window menu, the tab context menu, the limit notice.
+	Window	Παράθυρο
+	Move tab to new window	Μετακίνηση καρτέλας σε νέο παράθυρο
+	Merge all windows	Συγχώνευση όλων των παραθύρων
+	Close window	Κλείσιμο παραθύρου
+	Move to new window	Μετακίνηση σε νέο παράθυρο
+	Move to window	Μετακίνηση σε παράθυρο
+	Too many windows are open	Είναι ανοιχτά πάρα πολλά παράθυρα

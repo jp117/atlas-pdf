@@ -2789,3 +2789,11 @@ certificate	SHA-256 digest	Impronta SHA-256
 	Rotate the selected pages clockwise	Ruota le pagine selezionate in senso orario
 	Extract the selected pages…	Estrai le pagine selezionate…
 	Delete the selected pages	Elimina le pagine selezionate
+# Several windows (M14): the Window menu, the tab context menu, the limit notice.
+	Window	Finestra
+	Move tab to new window	Sposta scheda in una nuova finestra
+	Merge all windows	Unisci tutte le finestre
+	Close window	Chiudi finestra
+	Move to new window	Sposta in una nuova finestra
+	Move to window	Sposta nella finestra
+	Too many windows are open	Troppe finestre aperte

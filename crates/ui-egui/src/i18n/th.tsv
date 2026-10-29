@@ -2720,3 +2720,12 @@ theme	Appearance	ลักษณะที่ปรากฏ
 	Rotate the selected pages clockwise	หมุนหน้าที่เลือกตามเข็มนาฬิกา
 	Extract the selected pages…	แยกหน้าที่เลือกออก…
 	Delete the selected pages	ลบหน้าที่เลือก
+
+# Several windows (M14): the Window menu, the tab context menu, the limit notice.
+	Window	หน้าต่าง
+	Move tab to new window	ย้ายแท็บไปหน้าต่างใหม่
+	Merge all windows	รวมหน้าต่างทั้งหมด
+	Close window	ปิดหน้าต่าง
+	Move to new window	ย้ายไปหน้าต่างใหม่
+	Move to window	ย้ายไปหน้าต่าง
+	Too many windows are open	เปิดหน้าต่างมากเกินไป

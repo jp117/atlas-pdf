@@ -70,13 +70,18 @@ It also:
 
 `Page N` sheet containers from combined files stay on through every preset.
 
-### Tabs in their own windows
+### Tabs in several windows
 
-Drag a document tab down out of the tab strip (or off either side of the window) and let go: it
-opens in a new Atlas PDF window at the same page, and its tab closes in the old one. A tip at the
-pointer says when letting go will do that. A tab with unsaved changes is saved first, because the
-new window is a separate Atlas PDF that reads the file from disk. A document that was never saved
-asks where to save it, and cancelling leaves the tab where it was.
+Drag a document tab down out of the tab strip and let go: it opens in a window of its own, with
+its unsaved changes and undo history. Drag a tab onto another Atlas PDF window's tab strip and it
+joins that window at the gap under the pointer, which also takes it back to the window it came
+from. Dropped anywhere else in a window, it goes after the last tab. Escape cancels a drag. A
+tab's right-click menu has **Move to new window** and **Move to window**, and the **Window** menu
+can merge every window back into one.
+
+This is PdfCraft's pull request
+[storytold/pdfcraft#3483](https://github.com/storytold/pdfcraft/pull/3483), merged into Atlas
+before upstream has merged it.
 
 ### Takeoff for agents
 
@@ -135,7 +140,7 @@ code is kept out of upstream files so merges stay cheap:
 | ----------------------------------------- | ----------------------------------------------------------------- |
 | `crates/atlas` (`pdfcraft-atlas`, L4)     | Layer grouping and takeoff marks: pure rules with unit tests     |
 | `crates/render/src/shx.rs`                | SHX text as page text                                             |
-| `crates/ui-egui/src/atlas/`               | Takeoff tool, Takeoff panel, Layers panel, Atlas menu, tab windows |
+| `crates/ui-egui/src/atlas/`               | Takeoff tool, Takeoff panel, Layers panel, Atlas menu             |
 | `crates/automation/src/atlas.rs`          | `takeoff_*` tools                                                 |
 
 Upstream files carry one- to three-line hooks, each marked `Atlas fork`:
@@ -148,7 +153,6 @@ Upstream files carry one- to three-line hooks, each marked `Atlas fork`:
   `ui-egui/src/app/{control,keys}.rs`, `ui-egui/src/control/host.rs` and
   `ui-egui/src/panels/right.rs`;
 - `automation/src/{lib,dispatch,tools}.rs`;
-- `apps/pdfcraft/src/main.rs`: `--tab-window`, the window a dragged-out tab opens in;
 - `xtask/src/layers.rs`.
 
 The Atlas menu is part of upstream's menu bar (`ui-egui/src/menus.rs`, from craft-menu), so on
@@ -188,6 +192,10 @@ that skips them only gets harder to merge. Resolve each conflict by re-applying 
 - **Atlas's image decoding and sampling patches** in `vendor/hayro*` (vendor/README.md lists them),
   renumbered after upstream's own when both add patches.
 - **Every `Atlas fork` hook**: compare `git grep -c "Atlas fork"` on `main` and on the merge.
+- **Tabs in several windows** come from storytold/pdfcraft#3483, which upstream hadn't merged
+  when Atlas took it (2026-10-29). Once upstream merges it, the merge brings nothing new. If
+  upstream merges a different design instead, take upstream's and drop #3483's code
+  (`ui-egui/src/windows.rs` and its hooks).
 
 To take one particular fix whose commit applies cleanly, use `git cherry-pick <commit>`. After
 taking anything from upstream, run the quality gates on the crates it touched and

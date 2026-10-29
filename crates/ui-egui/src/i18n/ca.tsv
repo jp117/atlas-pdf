@@ -2818,3 +2818,11 @@ theme	Appearance	Aspecte
 	Rotate the selected pages clockwise	Gira les pàgines seleccionades en sentit horari
 	Extract the selected pages…	Extreu les pàgines seleccionades…
 	Delete the selected pages	Suprimeix les pàgines seleccionades
+# Several windows (M14).
+	Window	Finestra
+	Move tab to new window	Mou la pestanya a una finestra nova
+	Merge all windows	Combina totes les finestres
+	Close window	Tanca la finestra
+	Move to new window	Mou a una finestra nova
+	Move to window	Mou a la finestra
+	Too many windows are open	Hi ha massa finestres obertes

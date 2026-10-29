@@ -2842,3 +2842,11 @@ theme	Appearance	Aparência
 	Rotate the selected pages clockwise	Girar as páginas selecionadas no sentido horário
 	Extract the selected pages…	Extrair as páginas selecionadas…
 	Delete the selected pages	Excluir as páginas selecionadas
+# Several windows (M14): the Window menu, the tab context menu, the limit notice.
+	Window	Janela
+	Move tab to new window	Mover aba para uma nova janela
+	Merge all windows	Mesclar todas as janelas
+	Close window	Fechar janela
+	Move to new window	Mover para uma nova janela
+	Move to window	Mover para a janela
+	Too many windows are open	Há janelas demais abertas
