@@ -2749,3 +2749,12 @@ certificate	Version	وەشان
 	Rotate the selected pages clockwise	پەڕە هەڵبژێردراوەکان بە ئاڕاستەی میلی کاتژمێر بسوڕێنە
 	Extract the selected pages…	پەڕە هەڵبژێردراوەکان دەربهێنە…
 	Delete the selected pages	پەڕە هەڵبژێردراوەکان بسڕەوە
+
+# Several windows (M14): the Window menu, the tab context menu, the limit notice.
+	Window	پەنجەرە
+	Move tab to new window	گواستنەوەی تاب بۆ پەنجەرەیەکی نوێ
+	Merge all windows	یەکخستنی هەموو پەنجەرەکان
+	Close window	داخستنی پەنجەرە
+	Move to new window	گواستنەوە بۆ پەنجەرەیەکی نوێ
+	Move to window	گواستنەوە بۆ پەنجەرە
+	Too many windows are open	پەنجەرەی زۆر کراونەتەوە

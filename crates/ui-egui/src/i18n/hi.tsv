@@ -2794,3 +2794,11 @@ theme	Appearance	स्वरूप
 	Rotate the selected pages clockwise	चयनित पृष्ठों को दक्षिणावर्त घुमाएँ
 	Extract the selected pages…	चयनित पृष्ठ निकालें…
 	Delete the selected pages	चयनित पृष्ठ हटाएँ
+# Several windows (M14).
+	Window	विंडो
+	Move tab to new window	टैब को नई विंडो में ले जाएँ
+	Merge all windows	सभी विंडो मिलाएँ
+	Close window	विंडो बंद करें
+	Move to new window	नई विंडो में ले जाएँ
+	Move to window	विंडो में ले जाएँ
+	Too many windows are open	बहुत अधिक विंडो खुली हैं

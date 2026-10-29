@@ -2555,3 +2555,11 @@ animation effects	Off	Өшірулі
 	Rotate the selected pages clockwise	Таңдалған беттерді сағат тілімен бұру
 	Extract the selected pages…	Таңдалған беттерді шығарып алу…
 	Delete the selected pages	Таңдалған беттерді жою
+# Several windows (M14): the Window menu, the tab context menu, the limit notice.
+	Window	Терезе
+	Move tab to new window	Қойындыны жаңа терезеге жылжыту
+	Merge all windows	Барлық терезелерді біріктіру
+	Close window	Терезені жабу
+	Move to new window	Жаңа терезеге жылжыту
+	Move to window	Терезеге жылжыту
+	Too many windows are open	Тым көп терезе ашық

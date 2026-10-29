@@ -70,6 +70,19 @@ It also:
 
 `Page N` sheet containers from combined files stay on through every preset.
 
+### Tabs in several windows
+
+Drag a document tab down out of the tab strip and let go: it opens in a window of its own, with
+its unsaved changes and undo history. Drag a tab onto another Atlas PDF window's tab strip and it
+joins that window at the gap under the pointer, which also takes it back to the window it came
+from. Dropped anywhere else in a window, it goes after the last tab. Escape cancels a drag. A
+tab's right-click menu has **Move to new window** and **Move to window**, and the **Window** menu
+can merge every window back into one.
+
+This is PdfCraft's pull request
+[storytold/pdfcraft#3483](https://github.com/storytold/pdfcraft/pull/3483), merged into Atlas
+before upstream has merged it.
+
 ### Takeoff for agents
 
 `pdfcraft-cli run` and the MCP server gain `takeoff_list`, `takeoff_add`, `takeoff_update` and
@@ -179,6 +192,10 @@ that skips them only gets harder to merge. Resolve each conflict by re-applying 
 - **Atlas's image decoding and sampling patches** in `vendor/hayro*` (vendor/README.md lists them),
   renumbered after upstream's own when both add patches.
 - **Every `Atlas fork` hook**: compare `git grep -c "Atlas fork"` on `main` and on the merge.
+- **Tabs in several windows** come from storytold/pdfcraft#3483, which upstream hadn't merged
+  when Atlas took it (2026-10-29). Once upstream merges it, the merge brings nothing new. If
+  upstream merges a different design instead, take upstream's and drop #3483's code
+  (`ui-egui/src/windows.rs` and its hooks).
 
 To take one particular fix whose commit applies cleanly, use `git cherry-pick <commit>`. After
 taking anything from upstream, run the quality gates on the crates it touched and

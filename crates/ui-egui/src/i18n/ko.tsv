@@ -2794,3 +2794,11 @@ theme	Appearance	모양
 	Rotate the selected pages clockwise	선택한 페이지를 시계 방향으로 회전
 	Extract the selected pages…	선택한 페이지 추출…
 	Delete the selected pages	선택한 페이지 삭제
+# Several windows (M14).
+	Window	창
+	Move tab to new window	탭을 새 창으로 이동
+	Merge all windows	모든 창 병합
+	Close window	창 닫기
+	Move to new window	새 창으로 이동
+	Move to window	창으로 이동
+	Too many windows are open	열린 창이 너무 많습니다
