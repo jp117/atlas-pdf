@@ -8,7 +8,8 @@ use super::{CliError, stdout_line};
 // ---- automation --------------------------------------------------------------------------------
 
 pub(crate) fn automation(args: &[String]) -> Result<pdfcraft_automation::Automation, String> {
-    let a = pdfcraft_automation::Automation::new();
+    // Atlas fork: the printer rules the app uses.
+    let a = pdfcraft_automation::Automation::new().with_app_print_rules();
     match flag(args, "--root") {
         Some(root) => a.with_root(root).map_err(|e| format!("--root {root}: {e}")),
         None => Ok(a),

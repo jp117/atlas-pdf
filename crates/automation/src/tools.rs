@@ -552,7 +552,7 @@ pub fn tools() -> Vec<ToolDef> {
         t(
             "doc_print",
             "Print",
-            "Print with Acrobat's Print dialog options, or save the print-ready PDF. pages: a range such as \"1-3, 6, 9-\" (page labels allowed; default all); subset odd/even (by page number, as Acrobat counts them: pages 2, 7-10 with even prints 2, 8 and 10, not every second page of the range); reverse. layout: fit (default), actual, shrink, custom (scale %), multiple (per_sheet 2/4/6/9/16, order, border, auto_rotate; cut-stack order arranges single-sided sheets for cutting into piles and stacking left to right, top to bottom, keeping sheet order within each pile; duplex must be off), booklet (booklet_subset both/front/back, binding left/right; a booklet sets two-sided itself, as Acrobat does: both flips on the short edge, front or back prints one-sided), poster (scale %, overlap pt, cut_marks). orientation auto/portrait/landscape; comments_forms document / document-and-markups (default) / document-and-stamps / form-fields-only; paper Letter/Legal/Tabloid, ARCH A/B/C/D/E1/E, ANSI C/D/E, A0/A1/A2/A3/A4/A5/A6, or US #10 Envelope (short names or full preset labels); use layout actual for 100% in the print-ready PDF; printer drivers may still substitute paper or scale. Then path (save) or printer (a name or \"default\") with copies, collate, duplex off/long-edge/short-edge, grayscale, and options (driver options from printer_options, CUPS).",
+            "Print with Acrobat's Print dialog options, or save the print-ready PDF. pages: a range such as \"1-3, 6, 9-\" (page labels allowed; default all); subset odd/even (by page number, as Acrobat counts them: pages 2, 7-10 with even prints 2, 8 and 10, not every second page of the range); reverse. layout: fit (default), actual, shrink, custom (scale %), multiple (per_sheet 2/4/6/9/16, order, border, auto_rotate; cut-stack order arranges single-sided sheets for cutting into piles and stacking left to right, top to bottom, keeping sheet order within each pile; duplex must be off), booklet (booklet_subset both/front/back, binding left/right; a booklet sets two-sided itself, as Acrobat does: both flips on the short edge, front or back prints one-sided), poster (scale %, overlap pt, cut_marks). orientation auto/portrait/landscape; comments_forms document / document-and-markups (default) / document-and-stamps / form-fields-only; paper Letter/Legal/Tabloid, ARCH A/B/C/D/E1/E, ANSI C/D/E, A0/A1/A2/A3/A4/A5/A6, or US #10 Envelope (short names or full preset labels); use layout actual for 100% in the print-ready PDF; printer drivers may still substitute paper or scale. Atlas: paper \"auto\" reads each page's size as displayed (after CropBox and /Rotate, portrait and landscape being one size) and printer \"auto\" sends it to the printer the printer rules give that size, with layout actual by default for wide-format drawings; the result reports paper, printer and reason. A size no rule covers, a rule's printer that isn't installed, and mixed page sizes are errors that say what to pass (mixed \"split\" sends each size as its own job; never a fallback to another printer). An explicit printer and paper that go against the rules are refused unless allow_conflict is true. Use print_plan to see the choice without sending. Then path (save) or printer (a name or \"default\") with copies, collate, duplex off/long-edge/short-edge, grayscale, and options (driver options from printer_options, CUPS).",
         )
         .with(schema(
             json!({
@@ -572,9 +572,12 @@ pub fn tools() -> Vec<ToolDef> {
                 "cut_marks": { "type": "boolean" },
                 "orientation": { "type": "string", "enum": ["auto", "portrait", "landscape"] },
                 "comments_forms": { "type": "string", "enum": ["document", "document-and-markups", "document-and-stamps", "form-fields-only"] },
-                "paper": { "type": "string" },
+                "paper": { "type": "string", "description": "A paper's name, or \"auto\" for the size read from the pages." },
                 "path": { "type": "string" },
-                "printer": { "type": "string" },
+                "printer": { "type": "string", "description": "A printer's name, \"default\", or \"auto\" for the one the printer rules give the paper." },
+                "mixed": { "type": "string", "enum": ["refuse", "split"], "description": "With paper auto and pages of several sizes: refuse (default) says what is there; split sends each size as its own job." },
+                "rules": { "type": "array", "items": { "type": "object", "properties": { "paper": { "type": "string" }, "printer": { "type": "string" } }, "required": ["paper", "printer"], "additionalProperties": false }, "description": "Printer rules for this call, instead of the app's." },
+                "allow_conflict": { "type": "boolean", "description": "Send a printer and paper that go against the printer rules (default false: refused, saying why)." },
                 "copies": { "type": "integer", "minimum": 1, "maximum": 999 },
                 "collate": { "type": "boolean" },
                 "duplex": { "type": "string", "enum": ["off", "long-edge", "short-edge", "printer"], "description": "Two-sided printing (default off); printer sends no setting, so the printer's own default applies." },
@@ -1451,6 +1454,7 @@ pub fn tools() -> Vec<ToolDef> {
     .into_iter()
     // Atlas fork: takeoff tools.
     .chain(crate::atlas::tools())
+    .chain(crate::atlas_print::tools())
     .collect()
 }
 

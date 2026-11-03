@@ -781,6 +781,9 @@ impl Automation {
             "takeoff_add" => self.takeoff_add(&a)?,
             "takeoff_update" => self.takeoff_update(&a)?,
             "takeoff_export" => self.takeoff_export(&a)?,
+            "print_plan" => self.print_plan(&a)?,
+            "print_rules" => self.print_rules()?,
+            "print_rules_set" => self.print_rules_set(&a)?,
             other => return Err(ToolError::UnknownTool(other.into())),
         };
         Ok(vec![Content::Json(out)])

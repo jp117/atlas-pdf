@@ -17,6 +17,8 @@
 mod a11y;
 // Atlas fork: takeoff tools.
 mod atlas;
+// Atlas fork: printing by the printer rules.
+mod atlas_print;
 mod batch;
 mod comments;
 mod content;
@@ -90,6 +92,9 @@ pub struct Automation {
     /// Documents that lost a listing to the cap. A page of one with no listing is refused rather
     /// than read as "a number is a position", which the page may no longer match.
     evicted: HashSet<DocId>,
+    // Atlas fork: where the printer rules live, and the printers to take as installed (tests).
+    print_rules_file: Option<PathBuf>,
+    installed_printers: Option<Vec<String>>,
 }
 
 impl Default for Automation {
@@ -108,6 +113,8 @@ impl Automation {
             texts: TextCache::default(),
             listed: HashMap::new(),
             evicted: HashSet::new(),
+            print_rules_file: None,
+            installed_printers: None,
         }
     }
 

@@ -39,7 +39,7 @@ pub(crate) fn bad(m: impl Into<String>) -> ToolError {
 
 /// `doc_print`'s `paper`, by its name or a short form ("Letter", "ARCH D"), as its `PAPERS`
 /// index and size; US Letter when none is given.
-fn paper_named(name: Option<&str>) -> Result<(usize, (f64, f64))> {
+pub(crate) fn paper_named(name: Option<&str>) -> Result<(usize, (f64, f64))> {
     let mut papers = PAPERS.iter().enumerate();
     let found = match name {
         None => papers.next(),
@@ -231,10 +231,18 @@ impl Automation {
     /// `doc_print`: lay the document out with the Print dialog's options, then save the
     /// print-ready PDF to `path` or send it to `printer` with the chosen paper.
     pub(crate) fn doc_print(&mut self, a: &Args) -> Result<Value> {
+        // Atlas fork: the printer rules choose.
+        if crate::atlas_print::is_auto(a)? {
+            return self.doc_print_auto(a);
+        }
         let id = self.doc(a)?.id;
         let pages = self.print_pages(a)?;
         let options = JobOptions::read(a, "fit")?;
         let (paper_index, paper) = paper_named(a.opt_str("paper")?)?;
+        // Atlas fork: what goes against the printer rules isn't sent unasked.
+        if let Some(printer) = a.opt_str("printer")? {
+            self.check_print_rules(a, &pages, paper_index, printer, &options.layout)?;
+        }
         let settings = options.settings(pages, paper);
         let sizes: Vec<(f64, f64)> = self.doc(a)?.info.pages.iter().map(|p| (p.width as f64, p.height as f64)).collect();
         let sheets = print::layout(&sizes, &settings).map_err(|e| bad(e.to_string()))?.len();
