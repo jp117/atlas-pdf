@@ -441,6 +441,10 @@ fn app_creator<'a>(
         #[cfg(target_os = "windows")]
         atlas_install::attach(&mut app);
         app.printer_source = Some(pdfcraft_ui_egui::system_printers());
+        // Atlas fork: the Print dialog follows the printer rules.
+        if let Some(file) = pdfcraft_atlas::print_rules::app_file() {
+            app.use_print_rules_file(file);
+        }
         app.os_key_store_ids = cfg!(any(target_os = "macos", target_os = "windows"));
         #[cfg(target_os = "macos")]
         {

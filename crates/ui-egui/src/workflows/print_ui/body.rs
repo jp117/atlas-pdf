@@ -107,6 +107,8 @@ pub(crate) fn body(
                 ui.horizontal(|ui| {
                     let shown = match d.printer.as_deref() {
                         Some(p) => printer_label(p),
+                        // Atlas fork: the rules can't choose, and nothing else may.
+                        None if crate::atlas::print_routing::must_choose(d) => "Choose a printer…".to_string(),
                         None if still_looking(d) => tl!("Looking for printers…").to_string(),
                         None => tl!("Save as PDF").to_string(),
                     };
@@ -219,6 +221,8 @@ pub(crate) fn body(
                 }
                 ui.end_row();
             });
+            // Atlas fork: why this printer and paper.
+            crate::atlas::print_routing::panel(ui, d, t);
             // Windows says which drivers can't print two-sided as they're asked; they keep their
             // own setting, even when Two-sided is Off.
             if let Some(p) = d.printers.iter().find(|p| d.printer.as_ref() == Some(&p.name))
@@ -535,7 +539,7 @@ pub(crate) fn body(
     ui.add_space(12.0);
     let (mut go, mut cancel) = (false, false);
     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-        let looking = still_looking(d);
+        let looking = still_looking(d) || crate::atlas::print_routing::blocks_print(d);
         let label = if d.printer.is_some() || looking { tl!("Print") } else { tl!("Save as PDF") };
         if ui.add_enabled_ui(settings.is_ok() && !sheets.is_empty() && !looking, |ui| widgets::pill_button(ui, label, true)).inner.clicked() {
             go = true;

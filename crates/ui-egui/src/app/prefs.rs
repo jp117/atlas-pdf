@@ -151,7 +151,10 @@ impl PdfCraftApp {
         v["show_secured_notice"] = serde_json::Value::Bool(self.show_secured_notice);
         v["organize_zoom"] = serde_json::json!(self.organize_zoom);
         // Canonical names survive changes to the order of PAPERS and do not depend on UI language.
-        v["print_paper"] = serde_json::json!(pdfcraft_engine::print::PAPERS.get(self.print_draft.paper).map(|(name, _)| *name));
+        v["print_paper"] = serde_json::json!(
+            // Atlas fork: what the printer rules preselected isn't the paper last used.
+            pdfcraft_engine::print::PAPERS.get(self.print_draft.routing.paper_to_remember(self.print_draft.paper)).map(|(name, _)| *name)
+        );
         v.to_string()
     }
 

@@ -1277,6 +1277,8 @@ fn dialog_print(ui: &mut egui::Ui, app: &mut PdfCraftApp, req: &mut Pending) -> 
     let Some(doc) = app.session.get(id) else { return false };
     let sizes: Vec<(f64, f64)> = doc.info.pages.iter().map(|p| (p.width as f64, p.height as f64)).collect();
     let labels: Vec<String> = doc.info.pages.iter().map(|p| p.label.clone()).collect();
+    // Atlas fork: follow the printer rules.
+    crate::atlas::print_routing::update(&mut app.print_draft, &sizes, &labels);
     let rasters = crate::print_ui::preview_rasters(
         &app.print_draft,
         &sizes,

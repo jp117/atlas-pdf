@@ -171,6 +171,8 @@ impl PdfCraftApp {
             which,
             ..keep
         };
+        // Atlas fork: the printer rules choose from here.
+        crate::atlas::print_routing::on_open(self);
         self.dialog = Some(crate::Dialog::Print);
     }
 
@@ -392,6 +394,11 @@ impl PdfCraftApp {
         if !self.commit_form_typing() {
             return false;
         }
+        // Atlas fork: no job until the person has chosen what the rules couldn't.
+        if crate::atlas::print_routing::blocks_print(&self.print_draft) {
+            self.notify("Choose a printer first.");
+            return false;
+        }
         let Some((_, id)) = self.active_ids() else { return false };
         let Some(doc) = self.session.get(id) else { return false };
         let labels: Vec<String> = doc.info.pages.iter().map(|p| p.label.clone()).collect();
@@ -410,6 +417,7 @@ impl PdfCraftApp {
                 return false;
             }
         };
+        crate::atlas::print_routing::before_send(&mut self.print_draft);
         match self.print_draft.printer.clone() {
             #[cfg(target_arch = "wasm32")]
             Some(printer) if printer == crate::web_print::BROWSER_PRINTER => {
