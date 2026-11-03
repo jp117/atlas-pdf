@@ -13,7 +13,7 @@
 use pdfcraft_print::PAPERS;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// How far a page may be from a standard paper, in points on each side, and still be that paper
 /// (0.7 mm: CAD exports round their sizes). No two of [`PAPERS`] are this close.
@@ -204,6 +204,42 @@ fn bounded_list(names: &[String]) -> String {
     let shown: Vec<String> = names.iter().take(5).map(|n| n.chars().take(40).collect()).collect();
     let more = names.len().saturating_sub(shown.len());
     if more == 0 { shown.join(", ") } else { format!("{} and {more} more", shown.join(", ")) }
+}
+
+/// The environment variable that names another rules file, for testing.
+const FILE_VARIABLE: &str = "ATLASPDF_PRINT_RULES";
+
+/// The rules file the app and the command line share, beside the app's settings: the file named
+/// by [`FILE_VARIABLE`]; the portable data folder when the marker file (`ui-egui`'s
+/// `portable::MARKERS`) is beside the executable; otherwise the per-user settings folder.
+pub fn file_in(exe_dir: Option<&Path>, env: &dyn Fn(&str) -> Option<std::ffi::OsString>) -> Option<PathBuf> {
+    use crate::brand::{DATA_NAME, DATA_NAME_LOWER};
+    if let Some(file) = env(FILE_VARIABLE).filter(|f| !f.is_empty()) {
+        return Some(PathBuf::from(file));
+    }
+    if let Some(dir) = exe_dir
+        && ["portable.txt", "AtlasPDF.portable"].iter().any(|marker| dir.join(marker).is_file())
+    {
+        return Some(dir.join("AtlasPDFData").join(FILE_NAME));
+    }
+    let folder = if cfg!(windows) {
+        PathBuf::from(env("APPDATA")?).join(DATA_NAME).join("data")
+    } else if cfg!(target_os = "macos") {
+        PathBuf::from(env("HOME")?).join("Library/Application Support").join(DATA_NAME)
+    } else {
+        env("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .filter(|p| p.is_absolute())
+            .or_else(|| env("HOME").map(|home| PathBuf::from(home).join(".config")))?
+            .join(DATA_NAME_LOWER)
+    };
+    Some(folder.join(FILE_NAME))
+}
+
+/// [`file_in`] for this process.
+pub fn app_file() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok();
+    file_in(exe.as_deref().and_then(Path::parent), &|name| std::env::var_os(name))
 }
 
 /// Where a group of pages goes.
@@ -680,6 +716,29 @@ mod tests {
         let custom = PrinterRules { rules: vec![PrinterRule { paper: "A4".into(), printer: "P".into() }] };
         std::fs::write(&path, custom.to_json()).unwrap();
         assert_eq!(PrinterRules::load(&path), LoadedRules { rules: custom, problem: None });
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_rules_file_sits_with_the_settings_unless_told_otherwise() {
+        let env = |name: &str| match name {
+            "APPDATA" => Some(std::ffi::OsString::from(r"C:\Users\Me\AppData\Roaming")),
+            "HOME" => Some(std::ffi::OsString::from("/home/me")),
+            _ => None,
+        };
+        let file = file_in(None, &env).unwrap();
+        assert!(file.ends_with(FILE_NAME));
+        assert!(file.to_string_lossy().to_ascii_lowercase().contains("atlaspdf"), "{file:?}");
+
+        let told = |name: &str| (name == FILE_VARIABLE).then(|| std::ffi::OsString::from("elsewhere.json"));
+        assert_eq!(file_in(None, &told), Some(PathBuf::from("elsewhere.json")));
+        assert_eq!(file_in(None, &|_| None), None, "nowhere to keep it");
+
+        let dir = std::env::temp_dir().join(format!("atlas-print-rules-portable-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(file_in(Some(&dir), &env), Some(file), "no marker");
+        std::fs::write(dir.join("portable.txt"), b"").unwrap();
+        assert_eq!(file_in(Some(&dir), &env), Some(dir.join("AtlasPDFData").join(FILE_NAME)));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
