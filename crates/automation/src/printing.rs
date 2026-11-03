@@ -33,7 +33,7 @@ fn job_duplex(value: &str, layout: &Layout) -> Result<Option<spool::Duplex>> {
 }
 
 /// An invalid-arguments error saying `m`.
-fn bad(m: impl Into<String>) -> ToolError {
+pub(crate) fn bad(m: impl Into<String>) -> ToolError {
     ToolError::InvalidArgs(m.into())
 }
 
@@ -61,7 +61,7 @@ fn paper_named(name: Option<&str>) -> Result<(usize, (f64, f64))> {
 /// The spooler job for `doc_print` to `printer`. It feeds the paper the PDF was laid out on
 /// (`PAPERS[paper]`, as `media` after the driver's `options`) rather than the queue's default
 /// paper, which a job naming none got (A4 under Letter sheets on the queue in #3752).
-fn spool_job(a: &Args, printer: &str, title: String, duplex: Option<spool::Duplex>, paper: usize) -> Result<spool::Job> {
+pub(crate) fn spool_job(a: &Args, printer: &str, title: String, duplex: Option<spool::Duplex>, paper: usize) -> Result<spool::Job> {
     let options = match a.get("options") {
         None => Vec::new(),
         Some(Value::Object(m)) => m
@@ -85,50 +85,19 @@ fn spool_job(a: &Args, printer: &str, title: String, duplex: Option<spool::Duple
     })
 }
 
-impl Automation {
-    /// `printers`: the system's printers, the default marked, and each one's two-sided support
-    /// where the spooler reports it.
-    pub(crate) fn printers(&self) -> Result<Value> {
-        let list: Vec<Value> = spool::printers()
-            .into_iter()
-            .map(|p| {
-                let mut v = json!({ "name": p.name, "default": p.default });
-                if let Some(two_sided) = p.two_sided {
-                    v["two_sided"] = json!(two_sided);
-                }
-                v
-            })
-            .collect();
-        Ok(json!({ "count": list.len(), "printers": list }))
-    }
+/// What `doc_print`'s arguments ask for, apart from the pages, paper and printer.
+pub(crate) struct JobOptions {
+    pub(crate) layout: Layout,
+    pub(crate) duplex: Option<spool::Duplex>,
+    orientation: Orientation,
+    content: Content,
+    raster: Option<print::Raster>,
+}
 
-    pub(crate) fn printer_options(&self, a: &Args) -> Result<Value> {
-        let printer = a.str("printer")?;
-        let list: Vec<Value> = spool::printer_options(printer)
-            .into_iter()
-            .map(|o| {
-                let choices: Vec<Value> = o.choices.iter().map(|(value, label)| json!({ "value": value, "label": label })).collect();
-                json!({ "key": o.key, "label": o.label, "group": o.group, "default": o.default, "choices": choices })
-            })
-            .collect();
-        Ok(json!({ "printer": printer, "count": list.len(), "options": list }))
-    }
-
-    /// `doc_print`: lay the document out with the Print dialog's options, then save the
-    /// print-ready PDF to `path` or send it to `printer` with the chosen paper.
-    pub(crate) fn doc_print(&mut self, a: &Args) -> Result<Value> {
-        let doc = self.doc(a)?;
-        let (id, count) = (doc.id, doc.info.pages.len());
-        let labels: Vec<String> = doc.info.pages.iter().map(|p| p.label.clone()).collect();
-        let subset = match a.opt_str("subset")?.unwrap_or("all") {
-            "all" => Subset::All,
-            "odd" => Subset::Odd,
-            "even" => Subset::Even,
-            s => return Err(bad(format!("unknown subset {s:?}"))),
-        };
-        let pages = print::select_pages(count, a.opt_str("pages")?, &labels, subset, a.opt_bool("reverse")?.unwrap_or(false))
-            .map_err(|e| bad(e.to_string()))?;
-        let layout = match a.opt_str("layout")?.unwrap_or("fit") {
+impl JobOptions {
+    /// Read the arguments; `default_layout` applies when `layout` is left out.
+    pub(crate) fn read(a: &Args, default_layout: &str) -> Result<Self> {
+        let layout = match a.opt_str("layout")?.unwrap_or(default_layout) {
             "fit" => Layout::Size(SizeMode::Fit),
             "actual" => Layout::Size(SizeMode::Actual),
             "shrink" => Layout::Size(SizeMode::Shrink),
@@ -188,7 +157,6 @@ impl Automation {
             "form-fields-only" => Content::FormFieldsOnly,
             c => return Err(bad(format!("unknown comments_forms {c:?}"))),
         };
-        let (paper_index, paper) = paper_named(a.opt_str("paper")?)?;
         // Print as image (Acrobat's Advanced Print Setup): pictures at `dpi`, grey when
         // `grayscale` is also asked for.
         let raster = if a.opt_bool("as_image")?.unwrap_or(false) {
@@ -200,7 +168,74 @@ impl Automation {
         } else {
             None
         };
-        let settings = print::Settings { pages, paper, orientation, layout, content, raster, crops: Vec::new() };
+        Ok(JobOptions { layout, duplex, orientation, content, raster })
+    }
+
+    /// The engine settings for these options, for `pages` on `paper`.
+    pub(crate) fn settings(&self, pages: Vec<usize>, paper: (f64, f64)) -> print::Settings {
+        print::Settings {
+            pages,
+            paper,
+            orientation: self.orientation,
+            layout: self.layout,
+            content: self.content,
+            raster: self.raster,
+            crops: Vec::new(),
+        }
+    }
+}
+
+impl Automation {
+    /// `printers`: the system's printers, the default marked, and each one's two-sided support
+    /// where the spooler reports it.
+    pub(crate) fn printers(&self) -> Result<Value> {
+        let list: Vec<Value> = spool::printers()
+            .into_iter()
+            .map(|p| {
+                let mut v = json!({ "name": p.name, "default": p.default });
+                if let Some(two_sided) = p.two_sided {
+                    v["two_sided"] = json!(two_sided);
+                }
+                v
+            })
+            .collect();
+        Ok(json!({ "count": list.len(), "printers": list }))
+    }
+
+    pub(crate) fn printer_options(&self, a: &Args) -> Result<Value> {
+        let printer = a.str("printer")?;
+        let list: Vec<Value> = spool::printer_options(printer)
+            .into_iter()
+            .map(|o| {
+                let choices: Vec<Value> = o.choices.iter().map(|(value, label)| json!({ "value": value, "label": label })).collect();
+                json!({ "key": o.key, "label": o.label, "group": o.group, "default": o.default, "choices": choices })
+            })
+            .collect();
+        Ok(json!({ "printer": printer, "count": list.len(), "options": list }))
+    }
+
+    /// `doc_print`'s page selection: 0-based pages in print order.
+    pub(crate) fn print_pages(&self, a: &Args) -> Result<Vec<usize>> {
+        let doc = self.doc(a)?;
+        let count = doc.info.pages.len();
+        let labels: Vec<String> = doc.info.pages.iter().map(|p| p.label.clone()).collect();
+        let subset = match a.opt_str("subset")?.unwrap_or("all") {
+            "all" => Subset::All,
+            "odd" => Subset::Odd,
+            "even" => Subset::Even,
+            s => return Err(bad(format!("unknown subset {s:?}"))),
+        };
+        print::select_pages(count, a.opt_str("pages")?, &labels, subset, a.opt_bool("reverse")?.unwrap_or(false)).map_err(|e| bad(e.to_string()))
+    }
+
+    /// `doc_print`: lay the document out with the Print dialog's options, then save the
+    /// print-ready PDF to `path` or send it to `printer` with the chosen paper.
+    pub(crate) fn doc_print(&mut self, a: &Args) -> Result<Value> {
+        let id = self.doc(a)?.id;
+        let pages = self.print_pages(a)?;
+        let options = JobOptions::read(a, "fit")?;
+        let (paper_index, paper) = paper_named(a.opt_str("paper")?)?;
+        let settings = options.settings(pages, paper);
         let sizes: Vec<(f64, f64)> = self.doc(a)?.info.pages.iter().map(|p| (p.width as f64, p.height as f64)).collect();
         let sheets = print::layout(&sizes, &settings).map_err(|e| bad(e.to_string()))?.len();
         let bytes = self.session.print_pdf(id, &settings).map_err(failed)?;
@@ -212,7 +247,7 @@ impl Automation {
                 out["path"] = json!(path.to_string_lossy());
             }
             (None, Some(printer)) => {
-                let job = spool_job(a, printer, self.doc(a)?.name.clone(), duplex, paper_index)?;
+                let job = spool_job(a, printer, self.doc(a)?.name.clone(), options.duplex, paper_index)?;
                 out["job"] = json!(spool::submit(&bytes, &job).map_err(|e| failed(e.to_string()))?);
             }
             _ => return Err(bad("pass either path (save the print-ready PDF) or printer (a name from printers, or \"default\")")),
