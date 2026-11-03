@@ -215,7 +215,7 @@ fn a_manual_choice_stands_for_this_job_only() {
     h.get_by_value(CANON_C).click();
     h.run_steps(2);
     h.get_by_label("HP LaserJet M607 [F35101] (default)").click();
-    h.run_steps(2);
+    h.run_steps(5);
     h.get_by_value("ARCH C (18 x 24 in)").click();
     h.run_steps(2);
     h.get_by_label("Tabloid").click();
@@ -280,4 +280,92 @@ fn the_rules_decide_not_the_printer_names_in_the_code() {
     h.run_steps(4);
     open_print(&mut h);
     assert_eq!(h.state().print_draft.printer.as_deref(), Some("Plotter 7"));
+}
+
+/// Pick a printer and paper from the dialog's menus, as a person does.
+fn pick(h: &mut Harness<'static, PdfCraftApp>, shown_printer: &str, printer: &str, shown_paper: &str, paper: &str) {
+    h.get_by_value(shown_printer).click();
+    h.run_steps(2);
+    h.get_by_label(printer).click();
+    h.run_steps(5);
+    h.get_by_value(shown_paper).click();
+    h.run_steps(2);
+    h.get_by_label(paper).click();
+    h.run_steps(3);
+}
+
+/// The reported waste: ARCH C sent to the printer set up for the 36 inch roll went without a word.
+#[test]
+fn the_wrong_printer_warns_before_sending_and_one_click_fixes_it() {
+    let mut h = harness(&[ARCH_C]);
+    open_print(&mut h);
+    assert!(h.query_by_label("Print anyway").is_none(), "nothing to warn about yet");
+    h.get_by_value(CANON_C).click();
+    h.run_steps(2);
+    h.get_by_label(CANON_D).click();
+    h.run_steps(3);
+    h.get_by_label(
+        "These pages are 18 x 24, which the printer rules send to Canon TX-3200 18x24. You have selected Canon TX-3200, ARCH C (18 x 24 in).",
+    );
+    h.get_by_role_and_label(Role::Button, "Print anyway");
+
+    h.get_by_role_and_label(Role::Button, "Use Canon TX-3200 18x24, ARCH C (18 x 24 in)").click();
+    h.run_steps(3);
+    let d = &h.state().print_draft;
+    assert_eq!((d.printer.as_deref(), d.paper), (Some(CANON_C), paper("ARCH C")));
+    assert!(h.query_by_label("Print anyway").is_none());
+    h.get_by_role_and_label(Role::Button, "Print");
+}
+
+/// The reported bug, as an override: Letter on the 24 inch roll.
+#[test]
+fn the_wrong_paper_warns_and_the_fix_restores_the_size_and_actual_size() {
+    let mut h = harness(&[ARCH_C]);
+    open_print(&mut h);
+    h.get_by_value("ARCH C (18 x 24 in)").click();
+    h.run_steps(2);
+    h.get_by_label("US Letter").click();
+    h.run_steps(3);
+    h.get_by_role_and_label(Role::Button, "Print anyway");
+    h.get_by_role_and_label(Role::Button, "Use Canon TX-3200 18x24, ARCH C (18 x 24 in)").click();
+    h.run_steps(3);
+    assert_eq!(h.state().print_draft.paper, paper("ARCH C"));
+    assert!(h.query_by_label("Print anyway").is_none());
+}
+
+/// Print anyway honours the override: the warning doesn't block the person's choice.
+#[test]
+fn printing_past_a_warning_sends_what_was_chosen() {
+    let mut h = harness(&[ARCH_C]);
+    open_print(&mut h);
+    // Near the top of the Paper menu: a click can't reach an item scrolled out of the menu's view.
+    pick(&mut h, CANON_C, CANON_D, "ARCH C (18 x 24 in)", "US Legal");
+    h.get_by_role_and_label(Role::Button, "Print anyway");
+    let d = &h.state().print_draft;
+    assert_eq!((d.printer.as_deref(), d.paper), (Some(CANON_D), paper("Legal")));
+}
+
+#[test]
+fn save_as_pdf_goes_against_no_rule() {
+    let mut h = harness(&[ARCH_C]);
+    open_print(&mut h);
+    h.get_by_value(CANON_C).click();
+    h.run_steps(2);
+    h.get_by_label("Save as PDF").click();
+    h.run_steps(3);
+    assert!(h.state().print_draft.routing.conflict.is_none());
+    assert!(h.query_by_label("Print anyway").is_none());
+}
+
+/// A choice the person was asked to make carries no warning.
+#[test]
+fn choosing_for_a_size_with_no_rule_is_not_a_conflict() {
+    let mut h = harness(&[(1584, 2448)]);
+    open_print(&mut h);
+    h.get_by_value("Choose a printer…").click();
+    h.run_steps(2);
+    h.get_by_label(CANON_D).click();
+    h.run_steps(3);
+    assert!(h.state().print_draft.routing.conflict.is_none());
+    h.get_by_role_and_label(Role::Button, "Print");
 }

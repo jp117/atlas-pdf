@@ -537,10 +537,13 @@ pub(crate) fn body(
         });
     });
     ui.add_space(12.0);
+    // Atlas fork: what the printer rules say about this printer and paper, before it is sent.
+    crate::atlas::print_routing::conflict_strip(ui, d);
     let (mut go, mut cancel) = (false, false);
     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
         let looking = still_looking(d) || crate::atlas::print_routing::blocks_print(d);
         let label = if d.printer.is_some() || looking { tl!("Print") } else { tl!("Save as PDF") };
+        let label = crate::atlas::print_routing::print_label(d).unwrap_or(label);
         if ui.add_enabled_ui(settings.is_ok() && !sheets.is_empty() && !looking, |ui| widgets::pill_button(ui, label, true)).inner.clicked() {
             go = true;
         }
