@@ -68,6 +68,29 @@ Save as PDF never warns, and neither does a printer you were asked to choose. Mu
 Poster and Label put pages on other papers on purpose, so they only answer to the rule for the paper
 selected.
 
+### When the printer doesn't take the paper
+
+Print asks the selected printer's driver which papers it takes, and the Paper list offers only those.
+Choosing a printer without the paper selected, say the HP for a small copy of an 18 x 24 drawing,
+switches to the paper that printer uses by default and from Actual size to Fit, and Print says
+`ARCH C isn't available on this printer, so this uses US Letter, scaled to fit.` Going back to a
+printer that takes the paper, or to Save as PDF, gives it back.
+
+- **The rules still apply.** A job sent somewhere other than where the rules say still warns, and the
+  button still reads **Print anyway**.
+- **A rule for a paper its printer lacks** also ends up on that printer's default paper, with no
+  warning, because there is nothing to fix on that printer. The HP doesn't list Tabloid, so the
+  starter rule for it prints 11 x 17 pages on Letter. To keep them at size, point the Tabloid rule at
+  a printer that takes it.
+- **Match page at 100%** is greyed out when the printer doesn't take the page's paper.
+- **When a driver can't say**, or lists none of the papers in the Paper list, nothing changes and
+  every paper stays on offer. The spooler still refuses a job on a paper the driver doesn't have.
+- **Label stock is left alone**, because thermal drivers often list it a little short of 4 x 6.
+
+The first time Print asks about a printer it can take a second or so on a network printer, and the
+paper switches when the answer comes. The answer is kept until the app closes. A paper added to a
+driver meanwhile shows up the next time the app starts.
+
 ### Mixed page sizes
 
 Windows prints one paper size per job. Print shows the breakdown, with a printer and paper for each
@@ -152,6 +175,9 @@ To build it:
 
 ## Known limits
 
+- **The command line doesn't switch paper.** `doc_print` sends the paper it's given or detects, and
+  the job is refused with `… has no 11.00 × 17.00 inch paper` if the driver doesn't list it. Only the
+  Print window asks first.
 - **Color is always stated on the job.** `craft-print` writes `Color` or `Monochrome` into every
   ticket, from Print's grayscale box, so a color setting saved on a printer doesn't carry through.
   Paper source, roll width and rotate do.
