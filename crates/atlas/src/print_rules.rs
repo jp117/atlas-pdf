@@ -149,6 +149,8 @@ impl PrinterRules {
     /// Read a rules file's text. A rule that names no known paper or no printer is left out and
     /// reported; text that isn't a rules file is an error.
     pub fn parse(text: &str) -> Result<(PrinterRules, Option<String>), String> {
+        // Notepad and PowerShell save UTF-8 with a byte order mark, which JSON doesn't allow.
+        let text = text.strip_prefix('\u{feff}').unwrap_or(text);
         let file: RulesFile = serde_json::from_str(text).map_err(|e| format!("it isn't a printer rules file: {e}"))?;
         let mut rules = Vec::new();
         let mut skipped = Vec::new();
@@ -689,6 +691,14 @@ mod tests {
         for bad in ["", "not json", "[]", "{}", r#"{"rules":3}"#, r#"{"rules":[{"paper":1,"printer":2}]}"#] {
             assert!(PrinterRules::parse(bad).is_err(), "{bad}");
         }
+    }
+
+    /// A file edited in Notepad or written by PowerShell starts with a byte order mark.
+    #[test]
+    fn a_rules_file_with_a_byte_order_mark_is_read() {
+        let rules = PrinterRules::starter();
+        let marked = format!("\u{feff}{}", rules.to_json());
+        assert_eq!(PrinterRules::parse(&marked), Ok((rules, None)));
     }
 
     #[test]

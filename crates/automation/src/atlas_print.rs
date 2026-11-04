@@ -161,10 +161,11 @@ impl Automation {
 
     /// Before an explicit printer and paper are sent: refuse what goes against the rules, unless
     /// the caller says to send it anyway. A session with no rules has nothing to answer to.
-    pub(crate) fn check_print_rules(&self, a: &Args, pages: &[usize], paper: usize, printer: &str, layout: &Layout) -> Result<()> {
-        let Some((rules, _)) = self.call_rules(a)? else { return Ok(()) };
+    /// Returns why the rules couldn't be read, for the result to say.
+    pub(crate) fn check_print_rules(&self, a: &Args, pages: &[usize], paper: usize, printer: &str, layout: &Layout) -> Result<Option<String>> {
+        let Some((rules, problem)) = self.call_rules(a)? else { return Ok(None) };
         if a.opt_bool("allow_conflict")?.unwrap_or(false) {
-            return Ok(());
+            return Ok(problem);
         }
         let printer = if printer == "default" { system_default().unwrap_or_default() } else { printer.to_string() };
         let printers = self.installed();
@@ -173,7 +174,7 @@ impl Automation {
         let selected = Selected { printer: &printer, paper, one_page_per_sheet: matches!(layout, Layout::Size(_)) };
         match print_rules::conflict(plan.single(), selected, &rules, Some(&names)) {
             Some(found) => Err(conflict_error(&found)),
-            None => Ok(()),
+            None => Ok(problem),
         }
     }
 

@@ -240,14 +240,18 @@ impl Automation {
         let options = JobOptions::read(a, "fit")?;
         let (paper_index, paper) = paper_named(a.opt_str("paper")?)?;
         // Atlas fork: what goes against the printer rules isn't sent unasked.
-        if let Some(printer) = a.opt_str("printer")? {
-            self.check_print_rules(a, &pages, paper_index, printer, &options.layout)?;
-        }
+        let rules_problem = match a.opt_str("printer")? {
+            Some(printer) => self.check_print_rules(a, &pages, paper_index, printer, &options.layout)?,
+            None => None,
+        };
         let settings = options.settings(pages, paper);
         let sizes: Vec<(f64, f64)> = self.doc(a)?.info.pages.iter().map(|p| (p.width as f64, p.height as f64)).collect();
         let sheets = print::layout(&sizes, &settings).map_err(|e| bad(e.to_string()))?.len();
         let bytes = self.session.print_pdf(id, &settings).map_err(failed)?;
         let mut out = json!({ "sheets": sheets, "pages": settings.pages.len(), "bytes": bytes.len() });
+        if let Some(problem) = rules_problem {
+            out["rules_problem"] = json!(problem);
+        }
         match (a.opt_str("path")?, a.opt_str("printer")?) {
             (Some(p), None) => {
                 let path = self.resolve(p, true)?;
