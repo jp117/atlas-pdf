@@ -3,11 +3,13 @@
 //! that size, and says why. What the person changes stands for that job. With no rules source
 //! (tests of the upstream dialog, the browser) the dialog behaves as it always did.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use pdfcraft_atlas::print_rules::{self, Conflict, LoadedRules, Plan, PrinterRules, Selected, SizeGroup};
 use pdfcraft_engine::print::{self, PAPERS, SizeMode};
 
+use super::printer_papers::{self, PaperRead, PaperSwap};
 use crate::PdfCraftApp;
 use crate::print_ui::{Handling, PrintDraft};
 use crate::theme::Tokens;
@@ -43,6 +45,11 @@ pub(crate) struct PrintRulesState {
     pub(crate) asked_printers: bool,
     /// Stands in for the Windows setting, in tests.
     pub(crate) windows_manages_default: Option<bool>,
+    /// Stands in for the printers' drivers, in tests.
+    pub(crate) assumed_papers: Option<BTreeMap<String, pdfcraft_atlas::printer_papers::DriverPapers>>,
+    /// Drivers being asked which papers they take.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) paper_reads: Vec<(String, std::sync::mpsc::Receiver<Option<pdfcraft_atlas::printer_papers::DriverPapers>>)>,
 }
 
 impl PdfCraftApp {
@@ -83,6 +90,10 @@ pub struct JobRow {
     pub reason: String,
     /// How this choice goes against the rules.
     pub conflict: Option<Conflict>,
+    /// The paper this size is meant for, which `paper` differs from when the printer lacks it.
+    pub(super) wanted: usize,
+    /// The printer doesn't take the paper wanted, so this row uses another.
+    pub swapped: bool,
 }
 
 impl JobRow {
@@ -94,14 +105,18 @@ impl JobRow {
         let kept = old.iter().find(|row| row.key == key);
         let printer_picked = kept.is_some_and(|row| row.printer_picked);
         let paper_picked = kept.is_some_and(|row| row.paper_picked);
+        let kept_paper = kept.map_or(choice.paper, |row| if row.swapped { row.wanted } else { row.paper });
+        let paper = if paper_picked { kept_paper } else { choice.paper };
         JobRow {
             key,
             printer: if printer_picked { kept.and_then(|row| row.printer.clone()) } else { choice.printer },
-            paper: if paper_picked { kept.map_or(choice.paper, |row| row.paper) } else { choice.paper },
+            paper,
             printer_picked,
             paper_picked,
             reason: choice.reason,
             conflict: None,
+            wanted: paper,
+            swapped: false,
         }
     }
 }
@@ -143,15 +158,15 @@ pub struct PrintRouting {
     /// is sent on the rules' paper.
     pub last_used_paper: usize,
     /// The paper the rules last put in the dialog.
-    applied_paper: Option<usize>,
+    pub(super) applied_paper: Option<usize>,
     /// The person changed the paper for this job.
     pub paper_changed: bool,
     /// The layout the rules last put in the dialog.
-    applied_layout: Option<(Handling, SizeMode)>,
+    pub(super) applied_layout: Option<(Handling, SizeMode)>,
     /// The layout before the rules chose Actual size, given back to a job they don't choose it for.
     layout_before: Option<(Handling, SizeMode)>,
     /// The person changed the layout for this job.
-    layout_changed: bool,
+    pub(super) layout_changed: bool,
     /// A job went out on the dialog's paper.
     sent: bool,
     /// How the selected printer and paper go against the rules.
@@ -162,6 +177,12 @@ pub struct PrintRouting {
     pub one_paper: bool,
     /// Per size, in the plan's order, while the pages are of mixed sizes.
     pub rows: Vec<JobRow>,
+    /// What each printer's driver says it takes, kept between openings of the dialog.
+    pub printer_papers: BTreeMap<String, PaperRead>,
+    /// Printers to ask about.
+    pub papers_to_read: Vec<String>,
+    /// The paper was switched for one this printer takes.
+    pub paper_swap: Option<PaperSwap>,
 }
 
 impl PrintRouting {
@@ -185,6 +206,7 @@ pub(crate) fn on_open(app: &mut PdfCraftApp) {
     let manages = app.atlas.print.windows_manages_default.unwrap_or_else(windows_manages_default);
     let Some(source) = &app.atlas.print.source else { return };
     let loaded = source.load();
+    let printer_papers = printer_papers::reads_on_open(app);
     let d = &mut app.print_draft;
     d.paper = d.routing.paper_to_remember(d.paper);
     if let Some((handling, size)) = d.routing.layout_to_remember() {
@@ -200,6 +222,7 @@ pub(crate) fn on_open(app: &mut PdfCraftApp) {
         default_seen: d.routing.default_seen.take(),
         note_shown: d.routing.note_shown,
         windows_manages_default: manages,
+        printer_papers,
         ..PrintRouting::default()
     };
 }
@@ -231,6 +254,7 @@ pub(crate) fn update(d: &mut PrintDraft, sizes: &[(f64, f64)], labels: &[String]
     if d.routing.split && d.handling != Handling::Size {
         set_split(d, false);
     }
+    printer_papers::fit(d);
     d.routing.conflict = if splitting(d) { None } else { selected_conflict(d) };
     note_default_printer(d);
     refresh_row_conflicts(d);
@@ -266,6 +290,7 @@ fn set_split(d: &mut PrintDraft, split: bool) {
     d.routing.one_paper = !split;
     d.printer_picked = false;
     d.routing.paper_changed = false;
+    d.routing.paper_swap = None;
     // Planned again on the next frame.
     d.routing.seen = None;
     if split && d.handling != Handling::Size {
@@ -280,16 +305,27 @@ fn refresh_row_conflicts(d: &mut PrintDraft) {
     for (row, group) in r.rows.iter_mut().zip(&r.plan.groups) {
         row.conflict = row.printer.as_deref().and_then(|printer| {
             let selected = Selected { printer, paper: row.paper, one_page_per_sheet: true };
-            print_rules::conflict(Some(group), selected, &r.rules, known.then_some(names.as_slice()))
+            let conflict = print_rules::conflict(Some(group), selected, &r.rules, known.then_some(names.as_slice()));
+            conflict.filter(|conflict| !(row.swapped && fix_is(conflict, printer, row.wanted)))
         });
     }
 }
 
+/// The rules only want what this printer doesn't take, so their fix would change nothing.
+fn fix_is(conflict: &Conflict, printer: &str, paper: usize) -> bool {
+    conflict.fix.as_ref().is_some_and(|(wanted, wanted_paper)| wanted == printer && *wanted_paper == paper)
+}
+
 /// The settings for one size's job: Actual size for wide-format drawings until the person changes
-/// the size, otherwise as the dialog has it.
+/// the size, scaled to fit on a paper other than the one wanted, otherwise as the dialog has it.
 fn row_settings(base: &print::Settings, group: &SizeGroup, row: &JobRow, layout_changed: bool) -> Option<print::Settings> {
     let paper = PAPERS.get(row.paper)?.1;
-    let layout = if group.wide_format() && !layout_changed { print::Layout::Size(SizeMode::Actual) } else { base.layout };
+    let layout = match (layout_changed, row.swapped, group.wide_format()) {
+        (true, ..) => base.layout,
+        (false, true, _) => print::Layout::Size(SizeMode::Fit),
+        (false, false, true) => print::Layout::Size(SizeMode::Actual),
+        (false, false, false) => base.layout,
+    };
     Some(print::Settings { pages: group.pages.clone(), paper, layout, ..base.clone() })
 }
 
@@ -409,11 +445,12 @@ fn mixed_panel(ui: &mut egui::Ui, d: &mut PrintDraft, t: &Tokens) {
                 row.printer_picked = true;
             }
             let before = row.paper;
+            let offered = printer_papers::offered_papers(&d.routing.printer_papers, row.printer.as_deref(), row.paper);
             craft_ui::ComboBox::from_id_salt(("print-size-paper", i))
                 .selected_text(PAPERS.get(row.paper).map_or("", |p| p.0.split(" (").next().unwrap_or(p.0)))
                 .width(100.0)
                 .show_ui(ui, |ui| {
-                    for (index, (name, _)) in PAPERS.iter().enumerate() {
+                    for (index, (name, _)) in PAPERS.iter().enumerate().filter(|(index, _)| offered.contains(index)) {
                         ui.selectable_value(&mut row.paper, index, *name);
                     }
                 })
@@ -421,8 +458,15 @@ fn mixed_panel(ui: &mut egui::Ui, d: &mut PrintDraft, t: &Tokens) {
                 .accessible_name(format!("Paper for {size}"));
             if row.paper != before {
                 row.paper_picked = true;
+                row.swapped = false;
             }
             ui.end_row();
+            if row.swapped {
+                ui.label("");
+                let scaled = !d.routing.layout_changed;
+                ui.label(egui::RichText::new(printer_papers::note(row.wanted, row.paper, scaled)).small().color(t.text_muted));
+                ui.end_row();
+            }
             if row.printer.is_none() || group.paper.is_none() {
                 ui.label("");
                 ui.label(egui::RichText::new(row.reason.as_str()).small().color(t.text_muted));
@@ -454,6 +498,7 @@ fn mixed_panel(ui: &mut egui::Ui, d: &mut PrintDraft, t: &Tokens) {
             row.paper = paper;
             row.printer_picked = false;
             row.paper_picked = false;
+            row.swapped = false;
         }
     }
 }
@@ -469,11 +514,14 @@ fn selected_conflict(d: &PrintDraft) -> Option<Conflict> {
     let printer = d.printer.as_deref()?;
     let names: Vec<&str> = d.printers.iter().map(|p| p.name.as_str()).collect();
     let selected = Selected { printer, paper: d.paper, one_page_per_sheet: d.handling == Handling::Size };
-    print_rules::conflict(d.routing.plan.single(), selected, &d.routing.rules, printers_known(d).then_some(names.as_slice()))
+    let conflict = print_rules::conflict(d.routing.plan.single(), selected, &d.routing.rules, printers_known(d).then_some(names.as_slice()))?;
+    let cant_work = d.routing.paper_swap.as_ref().is_some_and(|swap| fix_is(&conflict, printer, swap.from()));
+    (!cant_work).then_some(conflict)
 }
 
 /// The one-click fix: the printer and paper the rules want, as if they had chosen them.
-fn apply_fix(d: &mut PrintDraft, printer: String, paper: usize) {
+pub(super) fn apply_fix(d: &mut PrintDraft, printer: String, paper: usize) {
+    d.routing.paper_swap = None;
     d.printer = Some(printer);
     d.printer_picked = false;
     d.paper = paper;
@@ -543,6 +591,7 @@ fn apply(d: &mut PrintDraft) {
         d.paper = choice.paper;
         d.paper_before_label = None;
         d.routing.applied_paper = Some(choice.paper);
+        d.routing.paper_swap = None;
     }
     if d.routing.layout_changed {
         return;
@@ -593,6 +642,7 @@ fn apply_mixed(d: &mut PrintDraft) {
             d.paper = r.last_used_paper;
             d.paper_before_label = None;
             r.applied_paper = Some(d.paper);
+            r.paper_swap = None;
         }
     }
 }
@@ -664,6 +714,9 @@ pub(crate) fn panel(ui: &mut egui::Ui, d: &mut PrintDraft, t: &Tokens) {
     ui.add_space(4.0);
     if let Some(reason) = &d.routing.reason {
         ui.label(egui::RichText::new(reason.as_str()).strong());
+    }
+    if let Some(swap) = &d.routing.paper_swap {
+        ui.label(swap.note());
     }
     if d.routing.must_choose && d.printer_picked {
         ui.label(egui::RichText::new("You chose this printer for this job.").small().color(t.text_muted));

@@ -216,8 +216,10 @@ pub(crate) fn body(
                 }
                 let paper_name = PAPERS.get(d.paper).map_or("US Letter", |p| p.0);
                 let before = d.paper;
+                // Atlas fork: only what this printer takes.
+                let offered = crate::atlas::printer_papers::offered(d);
                 craft_ui::ComboBox::from_id_salt("paper").selected_text(tl!(paper_name)).width(260.0).show_ui(ui, |ui| {
-                    for (i, (name, _)) in PAPERS.iter().enumerate() {
+                    for (i, (name, _)) in PAPERS.iter().enumerate().filter(|(i, _)| offered.contains(i)) {
                         ui.selectable_value(&mut d.paper, i, tl!(name));
                     }
                 })
@@ -256,7 +258,8 @@ pub(crate) fn body(
             if let Some(&source) = sizes.get(d.current_page) {
                 ui.horizontal_wrapped(|ui| {
                     ui.label(crate::i18n::fmt(tl!("PDF page: {size}"), &[("size", &d.units.size(source.0, source.1))]));
-                    let matched = print::matching_paper(source);
+                    // Atlas fork: a paper this printer doesn't take can't be matched on it.
+                    let matched = print::matching_paper(source).filter(|paper| crate::atlas::printer_papers::offered(d).contains(paper));
                     if ui.add_enabled(matched.is_some(), egui::Button::new(tl!("Match page at 100%"))).clicked()
                         && let Some(paper) = matched
                     {
