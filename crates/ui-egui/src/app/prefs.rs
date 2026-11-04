@@ -155,6 +155,7 @@ impl PdfCraftApp {
             // Atlas fork: what the printer rules preselected isn't the paper last used.
             pdfcraft_engine::print::PAPERS.get(self.print_draft.routing.paper_to_remember(self.print_draft.paper)).map(|(name, _)| *name)
         );
+        crate::atlas::print_routing::persist(&self.print_draft.routing, &mut v);
         v.to_string()
     }
 
@@ -248,6 +249,7 @@ impl PdfCraftApp {
         {
             self.print_draft.paper = paper;
         }
+        crate::atlas::print_routing::restore(&mut self.print_draft.routing, v);
         if let Some(on) = v["highlight_fields"].as_bool() {
             self.view_defaults.highlight_fields = on;
         }

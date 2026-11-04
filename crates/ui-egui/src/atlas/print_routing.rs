@@ -41,6 +41,8 @@ pub(crate) struct PrintRulesState {
     pub(crate) editor: Option<super::print_rules_ui::RulesEditor>,
     /// Preferences has asked for the printer list.
     pub(crate) asked_printers: bool,
+    /// Stands in for the Windows setting, in tests.
+    pub(crate) windows_manages_default: Option<bool>,
 }
 
 impl PdfCraftApp {
@@ -52,6 +54,11 @@ impl PdfCraftApp {
     /// Follow these printer rules.
     pub fn use_print_rules(&mut self, rules: PrinterRules) {
         self.atlas.print.source = Some(RulesSource::Fixed(rules));
+    }
+
+    /// Take this as Windows' "Let Windows manage my default printer" setting, instead of reading it.
+    pub fn assume_windows_manages_default_printer(&mut self, manages: bool) {
+        self.atlas.print.windows_manages_default = Some(manages);
     }
 
     /// The printer list, for Preferences ▸ Printer rules, the way Print reads it.
@@ -118,6 +125,14 @@ pub struct PrintRouting {
     /// The pages to print, by size.
     pub plan: Plan,
     seen: Option<Seen>,
+    /// The default printer when a job was last sent, kept across sessions.
+    pub default_seen: Option<String>,
+    /// The note about Windows moving the default printer has been shown, kept across sessions.
+    pub note_shown: bool,
+    /// "Let Windows manage my default printer" is on.
+    pub windows_manages_default: bool,
+    /// Shown once, in the Print dialog this was found in.
+    pub default_note: Option<String>,
     /// The person asked to edit the rules: Preferences opens instead.
     pub open_rules: bool,
     /// Why this printer and paper, for the dialog to say.
@@ -167,6 +182,7 @@ impl PrintRouting {
 pub(crate) fn on_open(app: &mut PdfCraftApp) {
     // Preferences reads the file again next time, in case it changed.
     app.atlas.print.editor = None;
+    let manages = app.atlas.print.windows_manages_default.unwrap_or_else(windows_manages_default);
     let Some(source) = &app.atlas.print.source else { return };
     let loaded = source.load();
     let d = &mut app.print_draft;
@@ -176,8 +192,16 @@ pub(crate) fn on_open(app: &mut PdfCraftApp) {
         d.size = size;
     }
     d.printer_picked = false;
-    d.routing =
-        PrintRouting { active: true, rules: loaded.rules, rules_problem: loaded.problem, last_used_paper: d.paper, ..PrintRouting::default() };
+    d.routing = PrintRouting {
+        active: true,
+        rules: loaded.rules,
+        rules_problem: loaded.problem,
+        last_used_paper: d.paper,
+        default_seen: d.routing.default_seen.take(),
+        note_shown: d.routing.note_shown,
+        windows_manages_default: manages,
+        ..PrintRouting::default()
+    };
 }
 
 /// Each frame of the dialog: notice what the person changed, and choose again when the pages to
@@ -208,7 +232,33 @@ pub(crate) fn update(d: &mut PrintDraft, sizes: &[(f64, f64)], labels: &[String]
         set_split(d, false);
     }
     d.routing.conflict = if splitting(d) { None } else { selected_conflict(d) };
+    note_default_printer(d);
     refresh_row_conflicts(d);
+}
+
+/// Say once if Windows has moved the default printer since a job was last sent.
+fn note_default_printer(d: &mut PrintDraft) {
+    if d.printers_loading || d.routing.default_note.is_some() {
+        return;
+    }
+    let now = d.printers.iter().find(|p| p.default).map(|p| p.name.as_str());
+    let r = &mut d.routing;
+    r.default_note = print_rules::default_printer_note(r.windows_manages_default, r.default_seen.as_deref(), now, r.note_shown);
+    r.note_shown |= r.default_note.is_some();
+}
+
+/// Whether "Let Windows manage my default printer" is on: it is unless `LegacyDefaultPrinterMode`
+/// says otherwise. Read only: Atlas PDF doesn't change it.
+#[cfg(target_os = "windows")]
+fn windows_manages_default() -> bool {
+    use winsafe::{HKEY, RegistryValue, co::RRF};
+    let key = "Software\\Microsoft\\Windows NT\\CurrentVersion\\Windows";
+    !matches!(HKEY::CURRENT_USER.RegGetValue(Some(key), Some("LegacyDefaultPrinterMode"), RRF::RT_REG_DWORD), Ok(RegistryValue::Dword(1)))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn windows_manages_default() -> bool {
+    false
 }
 
 /// Send each size to its printer, or everything on one paper.
@@ -275,6 +325,7 @@ pub(crate) fn print_split(app: &mut PdfCraftApp) -> Option<bool> {
             return Some(false);
         }
     };
+    note_default_before_send(&mut app.print_draft);
     let mut jobs = Vec::new();
     for (group, row) in app.print_draft.routing.plan.groups.clone().iter().zip(app.print_draft.routing.rows.clone()) {
         let Some(printer) = row.printer.clone() else { return Some(false) };
@@ -554,6 +605,33 @@ pub(crate) fn blocks_print(d: &PrintDraft) -> bool {
 /// A job is going out with what the dialog holds.
 pub(crate) fn before_send(d: &mut PrintDraft) {
     d.routing.sent = true;
+    note_default_before_send(d);
+}
+
+/// Remember the default printer as a job leaves, to see later whether Windows moved it. Atlas PDF
+/// names the printer in every job and never sets the default.
+fn note_default_before_send(d: &mut PrintDraft) {
+    d.routing.default_seen = d.printers.iter().find(|p| p.default).map(|p| p.name.clone());
+}
+
+/// The choices kept in the app's settings.
+pub(crate) fn persist(routing: &PrintRouting, settings: &mut serde_json::Value) {
+    if let Some(printer) = &routing.default_seen {
+        settings["print_default_seen"] = serde_json::json!(printer);
+    }
+    if routing.note_shown {
+        settings["print_default_note_shown"] = serde_json::Value::Bool(true);
+    }
+}
+
+/// Read back what [`persist`] kept. Anything malformed is ignored.
+pub(crate) fn restore(routing: &mut PrintRouting, settings: &serde_json::Value) {
+    if let Some(printer) = settings["print_default_seen"].as_str() {
+        routing.default_seen = Some(printer.to_string());
+    }
+    if let Some(shown) = settings["print_default_note_shown"].as_bool() {
+        routing.note_shown = shown;
+    }
 }
 
 /// The reason line, under the printer and paper.
@@ -570,6 +648,9 @@ pub(crate) fn panel(ui: &mut egui::Ui, d: &mut PrintDraft, t: &Tokens) {
     }
     if let Some(problem) = &d.routing.rules_problem {
         ui.label(egui::RichText::new(problem.as_str()).small().color(t.text_muted));
+    }
+    if let Some(note) = &d.routing.default_note {
+        ui.label(egui::RichText::new(note.as_str()).small().color(t.text_muted));
     }
     mixed_panel(ui, d, t);
     if ui.small_button("Printer rules…").on_hover_text("Choose which printer each paper size goes to").clicked() {

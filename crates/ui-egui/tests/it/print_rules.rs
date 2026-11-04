@@ -559,3 +559,34 @@ fn the_print_dialog_links_to_the_rules() {
     assert_eq!(h.state().dialog, Some(Dialog::Preferences));
     h.get_by_label("Printer rules");
 }
+
+/// Windows moved the default printer since the last job: said once, and the setting is untouched.
+#[test]
+fn a_default_printer_windows_moved_is_explained_once() {
+    let moved = r#"{"print_default_seen":"HP Old"}"#;
+    let mut h = harness_with(&[ARCH_C], ALL, Some(moved));
+    h.state_mut().assume_windows_manages_default_printer(true);
+    open_print(&mut h);
+    let note = h.state().print_draft.routing.default_note.clone().unwrap();
+    assert!(note.contains("from HP Old to HP LaserJet M607 [F35101]") && note.contains("Let Windows manage my default printer"), "{note}");
+    h.get_by_label(note.as_str());
+
+    // Kept across a restart, so it isn't said again.
+    let saved = h.state().persist();
+    h.get_by_label("Cancel").click();
+    h.run_steps(2);
+    open_print(&mut h);
+    assert_eq!(h.state().print_draft.routing.default_note, None, "said once");
+    let mut restarted = harness_with(&[ARCH_C], ALL, Some(&saved));
+    restarted.state_mut().assume_windows_manages_default_printer(true);
+    open_print(&mut restarted);
+    assert_eq!(restarted.state().print_draft.routing.default_note, None, "said once, across sessions");
+}
+
+#[test]
+fn a_default_printer_the_user_manages_needs_no_note() {
+    let mut h = harness_with(&[ARCH_C], ALL, Some(r#"{"print_default_seen":"HP Old"}"#));
+    h.state_mut().assume_windows_manages_default_printer(false);
+    open_print(&mut h);
+    assert_eq!(h.state().print_draft.routing.default_note, None);
+}
