@@ -392,11 +392,11 @@ fn a_size_with_no_rule_in_a_mixed_document_holds_every_job_until_chosen() {
     let send = h.get_by_role_and_label(Role::Button, "Send 2 jobs");
     assert!(send.accesskit_node().is_disabled(), "one size has no printer yet");
     assert!(!h.state_mut().print_now());
-    h.run_steps(2);
-    h.get_by_value("Choose a printer…").click();
-    h.run_steps(2);
-    h.get_by_label(CANON_D).click();
-    h.run_steps(3);
+    h.run_steps(8);
+    h.get_by_value("Choose a printer…").click_accesskit();
+    h.run_steps(8);
+    h.get_by_label(CANON_D).click_accesskit();
+    h.run_steps(8);
     assert!(!h.get_by_role_and_label(Role::Button, "Send 2 jobs").accesskit_node().is_disabled());
     assert!(h.state().print_draft.routing.rows[1].conflict.is_none(), "chosen when asked: no warning");
 }
@@ -405,13 +405,13 @@ fn a_size_with_no_rule_in_a_mixed_document_holds_every_job_until_chosen() {
 fn a_row_override_warns_and_its_fix_restores_the_rule() {
     let mut h = harness(&[ARCH_C, LETTER]);
     open_print(&mut h);
-    h.get_by_value(CANON_C).click();
-    h.run_steps(2);
-    h.get_by_label(CANON_D).click();
-    h.run_steps(6);
+    h.get_by_value(CANON_C).click_accesskit();
+    h.run_steps(8);
+    h.get_by_label(CANON_D).click_accesskit();
+    h.run_steps(8);
     h.get_by_role_and_label(Role::Button, "Send 2 jobs anyway");
-    h.get_by_role_and_label(Role::Button, "Use Canon TX-3200 18x24, ARCH C (18 x 24 in)").click();
-    h.run_steps(6);
+    h.get_by_role_and_label(Role::Button, "Use Canon TX-3200 18x24, ARCH C (18 x 24 in)").click_accesskit();
+    h.run_steps(8);
     h.get_by_role_and_label(Role::Button, "Send 2 jobs");
     assert_eq!(h.state().print_draft.routing.rows[0].printer.as_deref(), Some(CANON_C));
 }
@@ -421,20 +421,20 @@ fn a_row_override_warns_and_its_fix_restores_the_rule() {
 fn one_paper_for_a_mixed_document_must_be_chosen_and_then_asks_for_the_printer() {
     let mut h = harness_with(&[ARCH_C, LETTER], ALL, Some(r#"{"print_paper":"Tabloid"}"#));
     open_print(&mut h);
-    h.get_by_label("Print every page on one paper").click();
-    h.run_steps(3);
+    h.get_by_label("Print every page on one paper").click_accesskit();
+    h.run_steps(8);
     let d = &h.state().print_draft;
     assert!(!d.routing.split);
     assert_eq!((d.printer.as_deref(), d.paper), (None, paper("Tabloid")));
     assert!(!is_print_enabled(&h), "the rules can't say which printer");
-    h.get_by_value("Choose a printer…").click();
-    h.run_steps(2);
-    h.get_by_label("HP LaserJet M607 [F35101] (default)").click();
-    h.run_steps(3);
+    h.get_by_value("Choose a printer…").click_accesskit();
+    h.run_steps(8);
+    h.get_by_label("HP LaserJet M607 [F35101] (default)").click_accesskit();
+    h.run_steps(8);
     assert!(is_print_enabled(&h));
     // And back again.
-    h.get_by_label("Send each size to its printer (2 separate jobs)").click();
-    h.run_steps(3);
+    h.get_by_label("Send each size to its printer (2 separate jobs)").click_accesskit();
+    h.run_steps(8);
     h.get_by_role_and_label(Role::Button, "Send 2 jobs");
 }
 
@@ -443,7 +443,7 @@ fn a_booklet_of_mixed_pages_is_one_job_on_one_paper() {
     let mut h = harness(&[ARCH_C, LETTER]);
     open_print(&mut h);
     h.get_by_label("Booklet").click();
-    h.run_steps(3);
+    h.run_steps(8);
     assert!(!h.state().print_draft.routing.split);
 }
 
@@ -589,4 +589,24 @@ fn a_default_printer_the_user_manages_needs_no_note() {
     h.state_mut().assume_windows_manages_default_printer(false);
     open_print(&mut h);
     assert_eq!(h.state().print_draft.routing.default_note, None);
+}
+
+/// Mixed rows make the settings tall: Print stays reachable on a small screen.
+#[test]
+fn print_stays_on_a_small_screen_with_mixed_sizes() {
+    let bytes = drawing(&[ARCH_C, LETTER, ARCH_D]);
+    let mut h = Harness::builder().with_size(egui::vec2(1100.0, 640.0)).build_eframe(move |_| {
+        let mut app = PdfCraftApp::new();
+        app.set_option("language", "en").unwrap();
+        app.use_print_rules(PrinterRules::starter());
+        app.printer_source = Some(Arc::new(|| ALL.iter().map(|name| printer(name, *name == OFFICE)).collect()));
+        app.open_bytes("drawing.pdf", None, bytes.clone()).unwrap();
+        app
+    });
+    h.run_steps(4);
+    open_print(&mut h);
+    h.run_steps(6);
+    let send = h.get_by_role_and_label(Role::Button, "Send 3 jobs");
+    let bounds = send.accesskit_node().bounding_box().unwrap();
+    assert!(bounds.y1 <= 640.0, "the button is on screen: {bounds:?}");
 }

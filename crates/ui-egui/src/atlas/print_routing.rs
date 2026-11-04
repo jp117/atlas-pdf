@@ -285,11 +285,11 @@ fn refresh_row_conflicts(d: &mut PrintDraft) {
     }
 }
 
-/// The settings for one size's job: Actual size for wide-format drawings, otherwise as the dialog
-/// has it.
-fn row_settings(base: &print::Settings, group: &SizeGroup, row: &JobRow) -> Option<print::Settings> {
+/// The settings for one size's job: Actual size for wide-format drawings until the person changes
+/// the size, otherwise as the dialog has it.
+fn row_settings(base: &print::Settings, group: &SizeGroup, row: &JobRow, layout_changed: bool) -> Option<print::Settings> {
     let paper = PAPERS.get(row.paper)?.1;
-    let layout = if group.wide_format() { print::Layout::Size(SizeMode::Actual) } else { base.layout };
+    let layout = if group.wide_format() && !layout_changed { print::Layout::Size(SizeMode::Actual) } else { base.layout };
     Some(print::Settings { pages: group.pages.clone(), paper, layout, ..base.clone() })
 }
 
@@ -301,7 +301,7 @@ pub(crate) fn sheets_to_print(d: &PrintDraft, sizes: &[(f64, f64)], settings: &p
     }
     let mut sheets = Vec::new();
     for (group, row) in d.routing.plan.groups.iter().zip(&d.routing.rows) {
-        let Some(settings) = row_settings(settings, group, row) else { continue };
+        let Some(settings) = row_settings(settings, group, row, d.routing.layout_changed) else { continue };
         sheets.extend(print::layout(sizes, &settings)?);
     }
     Ok(sheets)
@@ -329,7 +329,7 @@ pub(crate) fn print_split(app: &mut PdfCraftApp) -> Option<bool> {
     let mut jobs = Vec::new();
     for (group, row) in app.print_draft.routing.plan.groups.clone().iter().zip(app.print_draft.routing.rows.clone()) {
         let Some(printer) = row.printer.clone() else { return Some(false) };
-        let Some(settings) = row_settings(&base, group, &row) else { return Some(false) };
+        let Some(settings) = row_settings(&base, group, &row, app.print_draft.routing.layout_changed) else { return Some(false) };
         let bytes = match app.session.print_pdf(id, &settings) {
             Ok(bytes) => bytes,
             Err(e) => {
@@ -397,7 +397,7 @@ fn mixed_panel(ui: &mut egui::Ui, d: &mut PrintDraft, t: &Tokens) {
             let before = row.printer.clone();
             craft_ui::ComboBox::from_id_salt(("print-size-printer", i))
                 .selected_text(shown)
-                .width(190.0)
+                .width(180.0)
                 .show_ui(ui, |ui| {
                     for name in &printers {
                         ui.selectable_value(&mut row.printer, Some(name.clone()), name.as_str());
@@ -410,8 +410,8 @@ fn mixed_panel(ui: &mut egui::Ui, d: &mut PrintDraft, t: &Tokens) {
             }
             let before = row.paper;
             craft_ui::ComboBox::from_id_salt(("print-size-paper", i))
-                .selected_text(PAPERS.get(row.paper).map_or("", |p| p.0))
-                .width(150.0)
+                .selected_text(PAPERS.get(row.paper).map_or("", |p| p.0.split(" (").next().unwrap_or(p.0)))
+                .width(100.0)
                 .show_ui(ui, |ui| {
                     for (index, (name, _)) in PAPERS.iter().enumerate() {
                         ui.selectable_value(&mut row.paper, index, *name);
@@ -441,6 +441,13 @@ fn mixed_panel(ui: &mut egui::Ui, d: &mut PrintDraft, t: &Tokens) {
             }
         }
     });
+    if !d.routing.layout_changed {
+        ui.label(
+            egui::RichText::new("Wide-format sizes print at Actual size until you change Size below. Others follow Size.")
+                .small()
+                .color(t.text_muted),
+        );
+    }
     for (i, (printer, paper)) in fixes {
         if let Some(row) = d.routing.rows.get_mut(i) {
             row.printer = Some(printer);
@@ -564,6 +571,9 @@ fn apply_mixed(d: &mut PrintDraft) {
         return;
     }
     r.split = !r.one_paper && r.plan.can_split() && d.handling == Handling::Size;
+    if r.applied_layout.is_none() {
+        r.applied_layout = Some((d.handling, d.size));
+    }
     let old = std::mem::take(&mut r.rows);
     if r.plan.can_split() {
         r.rows = r.plan.groups.iter().map(|group| JobRow::new(group, r.last_used_paper, &old)).collect();
@@ -585,6 +595,18 @@ fn apply_mixed(d: &mut PrintDraft) {
             r.applied_paper = Some(d.paper);
         }
     }
+}
+
+/// The mixed-size rows make the Print dialog's settings taller than most screens.
+pub(crate) fn scrolls_settings(d: &PrintDraft) -> bool {
+    d.routing.active && d.routing.plan.is_mixed()
+}
+
+/// The height the settings may take when they scroll (`mixed`): what the window has, less the
+/// title and the buttons, and never less than a usable list. `None`: they don't scroll.
+pub(crate) fn settings_scroll_height(ctx: &egui::Context, mixed: bool) -> Option<f32> {
+    const TITLE_AND_BUTTONS: f32 = 150.0;
+    mixed.then(|| (ctx.content_rect().height() - TITLE_AND_BUTTONS).max(240.0))
 }
 
 /// Mixed page sizes are going out as one job per size.
@@ -677,6 +699,24 @@ mod tests {
         assert_eq!(sheets.iter().map(|s| s.size).collect::<Vec<_>>(), sizes);
         let scale = |i: usize| sheets[i].placed[0].matrix.0[0];
         assert_eq!((scale(0), scale(2)), (1.0, 1.0), "wide-format pages at actual size");
+    }
+
+    /// Actual size is only the default: a Size the person chooses applies to every job.
+    #[test]
+    fn a_size_chosen_by_hand_applies_to_the_wide_format_jobs_too() {
+        let sizes = [(1296.0, 1728.0), (612.0, 792.0)];
+        let labels: Vec<String> = ["1", "2"].map(String::from).to_vec();
+        let mut d = PrintDraft::default();
+        d.routing.active = true;
+        d.routing.rules = PrinterRules::starter();
+        update(&mut d, &sizes, &labels);
+        d.size = SizeMode::Custom(50.0);
+        d.custom_scale = 50.0;
+        update(&mut d, &sizes, &labels);
+        assert!(d.routing.layout_changed);
+        let settings = d.settings(2, &labels).unwrap();
+        let sheets = sheets_to_print(&d, &sizes, &settings).unwrap();
+        assert_eq!(sheets[0].placed[0].matrix.0[0], 0.5);
     }
 
     #[test]

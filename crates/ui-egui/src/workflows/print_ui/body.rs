@@ -95,9 +95,11 @@ pub(crate) fn body(
     let settings = d.settings(sizes.len(), labels);
     let sheets = settings.as_ref().ok().and_then(|s| crate::atlas::print_routing::sheets_to_print(d, sizes, s).ok()).unwrap_or_default();
     d.sheet = d.sheet.min(sheets.len().saturating_sub(1));
+    let d_mixed = crate::atlas::print_routing::scrolls_settings(d);
     ui.horizontal_top(|ui| {
-        // Settings.
-        ui.vertical(|ui| {
+        // Settings. Atlas fork: the column is a closure so mixed-size rows can scroll, keeping Print
+        // on the screen.
+        let mut settings_column = |ui: &mut egui::Ui| {
             ui.set_width(470.0);
             egui::Grid::new("print-top").num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
                 let printer_caption = ui.label(tl!("Printer:"));
@@ -443,7 +445,15 @@ pub(crate) fn body(
                         .color(t.text_muted),
                     );
                 });
-        });
+        };
+        match crate::atlas::print_routing::settings_scroll_height(ui.ctx(), d_mixed) {
+            Some(height) => {
+                egui::ScrollArea::vertical().id_salt("print-settings").max_height(height).show(ui, |ui| ui.vertical(|ui| settings_column(ui)));
+            }
+            None => {
+                ui.vertical(|ui| settings_column(ui));
+            }
+        }
         ui.add_space(12.0);
         // Preview.
         ui.vertical(|ui| {
