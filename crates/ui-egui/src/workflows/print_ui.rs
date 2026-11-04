@@ -120,7 +120,7 @@ fn offered(printer: Option<&str>, printers: &[spool::Printer]) -> bool {
 /// for some other event to draw (#2108 review). Declared before the worker's sender, so the
 /// sender is dropped first and the frame finds the channel closed.
 #[cfg(not(target_arch = "wasm32"))]
-struct WakeOnExit(Option<egui::Context>);
+pub(crate) struct WakeOnExit(pub(crate) Option<egui::Context>);
 
 #[cfg(not(target_arch = "wasm32"))]
 impl Drop for WakeOnExit {
@@ -290,6 +290,8 @@ impl PdfCraftApp {
 
     /// Pick up a printer list, driver options or a spooled job that finished (each frame).
     pub(crate) fn poll_print(&mut self) {
+        // Atlas fork: which papers the selected printers take.
+        crate::atlas::printer_papers::poll_reads(self);
         #[cfg(target_arch = "wasm32")]
         self.poll_web_print();
         #[cfg(not(target_arch = "wasm32"))]

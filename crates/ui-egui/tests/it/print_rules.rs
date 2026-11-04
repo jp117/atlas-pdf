@@ -8,6 +8,7 @@ use egui::accesskit::Role;
 use egui_kittest::Harness;
 use egui_kittest::kittest::{NodeT, Queryable};
 use pdfcraft_atlas::print_rules::{PrinterRule, PrinterRules, paper_named};
+use pdfcraft_atlas::printer_papers::DriverPapers;
 use pdfcraft_engine::print::{SizeMode, spool};
 use pdfcraft_ui_egui::{Dialog, PdfCraftApp, PrintHandling};
 
@@ -609,4 +610,100 @@ fn print_stays_on_a_small_screen_with_mixed_sizes() {
     let send = h.get_by_role_and_label(Role::Button, "Send 3 jobs");
     let bounds = send.accesskit_node().bounding_box().unwrap();
     assert!(bounds.y1 <= 640.0, "the button is on screen: {bounds:?}");
+}
+
+/// The app with the starter rules, whose printers' drivers say which papers they take: the office
+/// printer has nothing wider than Legal.
+fn harness_knowing_papers(pages: &[(u32, u32)]) -> Harness<'static, PdfCraftApp> {
+    const LETTER_UM: (u32, u32) = (215_900, 279_400);
+    const LEGAL_UM: (u32, u32) = (215_900, 355_600);
+    const ARCH_C_UM: (u32, u32) = (457_200, 609_600);
+    const ARCH_D_UM: (u32, u32) = (609_600, 914_400);
+    let bytes = drawing(pages);
+    let mut h = Harness::builder().with_size(egui::vec2(1400.0, 1000.0)).build_eframe(move |_| {
+        let mut app = PdfCraftApp::new();
+        app.set_option("language", "en").unwrap();
+        app.use_print_rules(PrinterRules::starter());
+        app.printer_source = Some(Arc::new(|| ALL.iter().map(|name| printer(name, *name == OFFICE)).collect()));
+        let mut papers = std::collections::BTreeMap::new();
+        papers.insert(OFFICE.to_string(), DriverPapers::new([LETTER_UM, LEGAL_UM], Some(LETTER_UM)).unwrap());
+        let rolls = [LETTER_UM, LEGAL_UM, ARCH_C_UM, ARCH_D_UM];
+        papers.insert(CANON_C.to_string(), DriverPapers::new(rolls, Some(ARCH_C_UM)).unwrap());
+        papers.insert(CANON_D.to_string(), DriverPapers::new(rolls, Some(ARCH_D_UM)).unwrap());
+        app.assume_printer_papers(papers);
+        app.open_bytes("drawing.pdf", None, bytes.clone()).unwrap();
+        app
+    });
+    h.run_steps(4);
+    h
+}
+
+fn choose_printer(h: &mut Harness<'static, PdfCraftApp>, shown: &str, choice: &str) {
+    h.get_by_value(shown).click();
+    h.run_steps(2);
+    h.get_by_label(choice).click();
+    h.run_steps(5);
+}
+
+/// An 18 x 24 drawing sent to the office printer for a small copy: Letter, scaled to fit, and the
+/// Paper list holds only what that printer takes. Back on the plotter, nothing has been lost.
+#[test]
+fn a_printer_without_the_paper_gets_a_paper_it_takes_and_the_dialog_says_so() {
+    const NOTE: &str = "ARCH C isn't available on this printer, so this uses US Letter, scaled to fit.";
+    let mut h = harness_knowing_papers(&[ARCH_C]);
+    open_print(&mut h);
+    h.run_steps(3);
+    let d = &h.state().print_draft;
+    assert_eq!((d.printer.as_deref(), d.paper, d.size), (Some(CANON_C), paper("ARCH C"), SizeMode::Actual));
+    assert!(h.query_by_label(NOTE).is_none());
+
+    choose_printer(&mut h, CANON_C, "HP LaserJet M607 [F35101] (default)");
+    let d = &h.state().print_draft;
+    assert_eq!((d.printer.as_deref(), d.paper, d.size), (Some(OFFICE), paper("US Letter"), SizeMode::Fit));
+    h.get_by_label(NOTE);
+    h.get_by_role_and_label(Role::Button, "Print anyway");
+    assert!(h.get_by_label("Match page at 100%").accesskit_node().is_disabled(), "the page's own paper isn't on this printer");
+
+    h.get_by_value("US Letter").click();
+    h.run_steps(2);
+    h.get_by_label("US Legal");
+    assert!(h.query_by_label("ARCH C (18 x 24 in)").is_none(), "not offered");
+    assert!(h.query_by_label("Tabloid").is_none(), "not offered");
+    h.get_by_role_and_label(Role::Button, "US Letter").click();
+    h.run_steps(3);
+
+    choose_printer(&mut h, OFFICE, CANON_C);
+    let d = &h.state().print_draft;
+    assert_eq!((d.printer.as_deref(), d.paper, d.size), (Some(CANON_C), paper("ARCH C"), SizeMode::Actual));
+    assert!(h.query_by_label(NOTE).is_none());
+    assert!(h.query_by_label("Print anyway").is_none());
+}
+
+/// The next print starts from the rules, and doesn't remember a paper nobody chose.
+#[test]
+fn the_switch_lasts_for_this_job_only() {
+    let mut h = harness_knowing_papers(&[ARCH_C]);
+    open_print(&mut h);
+    h.run_steps(3);
+    choose_printer(&mut h, CANON_C, "HP LaserJet M607 [F35101] (default)");
+    assert_eq!(h.state().print_draft.paper, paper("US Letter"));
+    h.get_by_label("Cancel").click();
+    h.run_steps(2);
+    open_print(&mut h);
+    h.run_steps(3);
+    let d = &h.state().print_draft;
+    assert_eq!((d.printer.as_deref(), d.paper, d.size), (Some(CANON_C), paper("ARCH C"), SizeMode::Actual));
+    assert_eq!(d.routing.paper_swap, None);
+}
+
+#[test]
+fn drivers_that_say_nothing_leave_every_paper_on_offer() {
+    let mut h = harness(&[ARCH_C]);
+    open_print(&mut h);
+    choose_printer(&mut h, CANON_C, "HP LaserJet M607 [F35101] (default)");
+    let d = &h.state().print_draft;
+    assert_eq!((d.printer.as_deref(), d.paper, d.size), (Some(OFFICE), paper("ARCH C"), SizeMode::Actual));
+    h.get_by_value("ARCH C (18 x 24 in)").click();
+    h.run_steps(2);
+    h.get_by_label("Tabloid");
 }

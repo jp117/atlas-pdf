@@ -7,6 +7,7 @@
 //!   Pure logic.
 //! - [`brand`]: the app's name and the name of its per-user folders.
 //! - [`print_rules`]: which printer and paper a document's pages belong on.
+//! - [`printer_papers`]: which papers a printer's driver takes.
 //! - [`takeoff`]: takeoff marks (included / included with comments / excluded) stored as
 //!   standard Square annotations with a private `/AtlasTakeoff` dictionary.
 
@@ -15,4 +16,5 @@
 pub mod brand;
 pub mod layers;
 pub mod print_rules;
+pub mod printer_papers;
 pub mod takeoff;

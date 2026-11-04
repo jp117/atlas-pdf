@@ -88,7 +88,7 @@ before upstream has merged it.
 Print reads each PDF's page size, preselects the paper and the printer that **Printer rules** give it
 (Actual size for wide-format drawings), and says why. It warns before sending anything that goes
 against the rules, with a one-click fix, sends mixed sizes as one job per size, and asks rather than
-falling back when no rule applies. `doc_print` does the same with `paper` and `printer` set to `auto`.
+falling back when no rule applies. The paper stays within what the selected printer takes. `doc_print` does the same with `paper` and `printer` set to `auto`.
 See [Printing drawings in Atlas PDF](docs/printing-atlas.md).
 
 ### Takeoff for agents
@@ -152,6 +152,7 @@ code is kept out of upstream files so merges stay cheap:
 | `crates/automation/src/atlas.rs`          | `takeoff_*` tools                                                 |
 | `crates/atlas/src/print_rules.rs`         | Printer rules and choosing by page size: pure rules with tests    |
 | `crates/ui-egui/src/atlas/print_routing.rs`, `print_rules_ui.rs` | The Print dialog following the rules; Preferences ▸ Printer rules |
+| `crates/atlas/src/printer_papers.rs`, `crates/ui-egui/src/atlas/printer_papers.rs` | Which papers a printer's driver takes, and keeping Print's paper to them |
 | `crates/automation/src/atlas_print.rs`    | `doc_print`'s `auto` mode, `print_plan`, `print_rules*`           |
 
 Upstream files carry one- to three-line hooks, each marked `Atlas fork`:
