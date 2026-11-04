@@ -349,6 +349,19 @@ function Invoke-WindowCases {
         } finally { Stop-Window }
     }
 
+    Invoke-Case 'window: a printer without the paper gets one it takes' {
+        Start-Window $pdf.cPortrait
+        try {
+            Open-PrintDialog
+            Test-OnScreen 'window: menu' "18 x 24 detected: $canonC"
+            Select-Menu $canonC "$office (default)"
+            Test-OnScreen 'window: small copy' "ARCH C isn't available on this printer, so this uses US Letter, scaled to fit."
+            Test-OnScreen 'window: small copy' "These pages are 18 x 24, which the printer rules send to $canonC. You have selected $office, US Letter."
+            $held = Invoke-HeldJob -Expect @{ $office = 1; $canonC = 0 } -Send { Invoke-Click 'Print anyway' }
+            [void](Test-Job 'window: small copy' $held[0] @(, $letterPaper) $null)
+        } finally { Stop-Window }
+    }
+
     Invoke-Case 'window: the one-click fix sends it to the rule''s printer' {
         Start-Window $pdf.cPortrait
         try {
@@ -365,8 +378,8 @@ function Invoke-WindowCases {
         Start-Window $pdf.letter
         try {
             Open-PrintDialog
-            # Tabloid picked by hand for a job that never prints: now the last paper used.
-            Select-Menu 'US Letter' 'Tabloid'
+            # Legal picked by hand for a job that never prints: now the last paper used.
+            Select-Menu 'US Letter' 'US Legal'
             Invoke-Click 'Cancel'
             Ui open "path=$($pdf.cPortrait)" | Out-Null
             Start-Sleep -Seconds 2
