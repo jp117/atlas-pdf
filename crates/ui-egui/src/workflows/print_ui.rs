@@ -399,6 +399,10 @@ impl PdfCraftApp {
             self.notify("Choose a printer first.");
             return false;
         }
+        // Atlas fork: mixed page sizes can go out as one job per size.
+        if let Some(sent) = crate::atlas::print_routing::print_split(self) {
+            return sent;
+        }
         let Some((_, id)) = self.active_ids() else { return false };
         let Some(doc) = self.session.get(id) else { return false };
         let labels: Vec<String> = doc.info.pages.iter().map(|p| p.label.clone()).collect();
@@ -440,7 +444,7 @@ impl PdfCraftApp {
     /// the progress card counts the sheets as they reach the spooler, and the spooler's answer
     /// arrives as a notice.
     #[cfg(not(target_arch = "wasm32"))]
-    fn send_to_printer(&mut self, printer: String, bytes: Vec<u8>, job: spool::Job) -> bool {
+    pub(crate) fn send_to_printer(&mut self, printer: String, bytes: Vec<u8>, job: spool::Job) -> bool {
         let (tx, rx) = std::sync::mpsc::channel();
         let ctx = self.ctx.clone();
         std::thread::spawn(move || {
@@ -464,7 +468,7 @@ impl PdfCraftApp {
 
     /// A browser has no spooler: `submit` answers at once.
     #[cfg(target_arch = "wasm32")]
-    fn send_to_printer(&mut self, printer: String, bytes: Vec<u8>, job: spool::Job) -> bool {
+    pub(crate) fn send_to_printer(&mut self, printer: String, bytes: Vec<u8>, job: spool::Job) -> bool {
         let result = spool::submit(&bytes, &job).map_err(|e| e.to_string());
         let ok = result.is_ok();
         self.report_print_job(&printer, result);
@@ -599,7 +603,7 @@ pub(crate) const PREVIEW_BYTES: f64 = 128.0 * 1024.0 * 1024.0;
 /// within [`PREVIEW_MAX_SIDE`] (and `max_side`, the GPU's texture limit) and [`PREVIEW_BYTES`].
 pub(crate) fn preview_rasters(d: &PrintDraft, sizes: &[(f64, f64)], labels: &[String], ppp: f32, max_side: f32) -> Vec<(usize, f32)> {
     let Ok(settings) = d.settings(sizes.len(), labels) else { return Vec::new() };
-    let Ok(sheets) = print::layout(sizes, &settings) else { return Vec::new() };
+    let Ok(sheets) = crate::atlas::print_routing::sheets_to_print(d, sizes, &settings) else { return Vec::new() };
     if sheets.is_empty() {
         return Vec::new();
     }

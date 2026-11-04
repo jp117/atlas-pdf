@@ -369,3 +369,92 @@ fn choosing_for_a_size_with_no_rule_is_not_a_conflict() {
     assert!(h.state().print_draft.routing.conflict.is_none());
     h.get_by_role_and_label(Role::Button, "Print");
 }
+
+#[test]
+fn mixed_sizes_show_the_breakdown_and_offer_separate_jobs() {
+    let mut h = harness(&[ARCH_C, LETTER, (1728, 1296), ARCH_D]);
+    open_print(&mut h);
+    h.get_by_label("Mixed page sizes: 2 pages 18 x 24, 1 page Letter, 1 page 24 x 36.");
+    h.get_by_label("Send each size to its printer (3 separate jobs)");
+    h.get_by_label("Print every page on one paper");
+    h.get_by_role_and_label(Role::Button, "Send 3 jobs");
+
+    let d = &h.state().print_draft;
+    let rows: Vec<(Option<&str>, usize)> = d.routing.rows.iter().map(|r| (r.printer.as_deref(), r.paper)).collect();
+    assert_eq!(rows, [(Some(CANON_C), paper("ARCH C")), (Some(OFFICE), paper("Letter")), (Some(CANON_D), paper("ARCH D"))]);
+    assert_eq!(d.printer, None, "no one printer takes them all");
+}
+
+#[test]
+fn a_size_with_no_rule_in_a_mixed_document_holds_every_job_until_chosen() {
+    let mut h = harness(&[ARCH_C, (1584, 2448)]);
+    open_print(&mut h);
+    let send = h.get_by_role_and_label(Role::Button, "Send 2 jobs");
+    assert!(send.accesskit_node().is_disabled(), "one size has no printer yet");
+    assert!(!h.state_mut().print_now());
+    h.run_steps(2);
+    h.get_by_value("Choose a printer…").click();
+    h.run_steps(2);
+    h.get_by_label(CANON_D).click();
+    h.run_steps(3);
+    assert!(!h.get_by_role_and_label(Role::Button, "Send 2 jobs").accesskit_node().is_disabled());
+    assert!(h.state().print_draft.routing.rows[1].conflict.is_none(), "chosen when asked: no warning");
+}
+
+#[test]
+fn a_row_override_warns_and_its_fix_restores_the_rule() {
+    let mut h = harness(&[ARCH_C, LETTER]);
+    open_print(&mut h);
+    h.get_by_value(CANON_C).click();
+    h.run_steps(2);
+    h.get_by_label(CANON_D).click();
+    h.run_steps(6);
+    h.get_by_role_and_label(Role::Button, "Send 2 jobs anyway");
+    h.get_by_role_and_label(Role::Button, "Use Canon TX-3200 18x24, ARCH C (18 x 24 in)").click();
+    h.run_steps(6);
+    h.get_by_role_and_label(Role::Button, "Send 2 jobs");
+    assert_eq!(h.state().print_draft.routing.rows[0].printer.as_deref(), Some(CANON_C));
+}
+
+/// Putting every page on one paper is the person's choice, and then it asks like any other.
+#[test]
+fn one_paper_for_a_mixed_document_must_be_chosen_and_then_asks_for_the_printer() {
+    let mut h = harness_with(&[ARCH_C, LETTER], ALL, Some(r#"{"print_paper":"Tabloid"}"#));
+    open_print(&mut h);
+    h.get_by_label("Print every page on one paper").click();
+    h.run_steps(3);
+    let d = &h.state().print_draft;
+    assert!(!d.routing.split);
+    assert_eq!((d.printer.as_deref(), d.paper), (None, paper("Tabloid")));
+    assert!(!is_print_enabled(&h), "the rules can't say which printer");
+    h.get_by_value("Choose a printer…").click();
+    h.run_steps(2);
+    h.get_by_label("HP LaserJet M607 [F35101] (default)").click();
+    h.run_steps(3);
+    assert!(is_print_enabled(&h));
+    // And back again.
+    h.get_by_label("Send each size to its printer (2 separate jobs)").click();
+    h.run_steps(3);
+    h.get_by_role_and_label(Role::Button, "Send 2 jobs");
+}
+
+#[test]
+fn a_booklet_of_mixed_pages_is_one_job_on_one_paper() {
+    let mut h = harness(&[ARCH_C, LETTER]);
+    open_print(&mut h);
+    h.get_by_label("Booklet").click();
+    h.run_steps(3);
+    assert!(!h.state().print_draft.routing.split);
+}
+
+/// A file with more sizes than can be sent apart doesn't offer it, and doesn't choose for them.
+#[test]
+fn too_many_sizes_to_send_apart_ask_for_one_paper() {
+    let sizes: Vec<(u32, u32)> = (0..20).map(|i| (300 + i * 7, 500 + i * 7)).collect();
+    let mut h = harness(&sizes);
+    open_print(&mut h);
+    let d = &h.state().print_draft;
+    assert!(!d.routing.split && d.routing.rows.is_empty());
+    assert_eq!(d.printer, None);
+    assert!(!is_print_enabled(&h));
+}
