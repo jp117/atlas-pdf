@@ -93,11 +93,13 @@ pub(crate) fn body(
     ui.label(egui::RichText::new(tl!("Print")).font(theme::semibold(18.0)));
     ui.add_space(8.0);
     let settings = d.settings(sizes.len(), labels);
-    let sheets = settings.as_ref().ok().and_then(|s| print::layout(sizes, s).ok()).unwrap_or_default();
+    let sheets = settings.as_ref().ok().and_then(|s| crate::atlas::print_routing::sheets_to_print(d, sizes, s).ok()).unwrap_or_default();
     d.sheet = d.sheet.min(sheets.len().saturating_sub(1));
+    let d_mixed = crate::atlas::print_routing::scrolls_settings(d);
     ui.horizontal_top(|ui| {
-        // Settings.
-        ui.vertical(|ui| {
+        // Settings. Atlas fork: the column is a closure so mixed-size rows can scroll, keeping Print
+        // on the screen.
+        let mut settings_column = |ui: &mut egui::Ui| {
             ui.set_width(470.0);
             egui::Grid::new("print-top").num_columns(2).spacing([10.0, 8.0]).show(ui, |ui| {
                 let printer_caption = ui.label(tl!("Printer:"));
@@ -105,8 +107,15 @@ pub(crate) fn body(
                 // The browser's print dialog sets copies, two-sided printing and colour itself.
                 let browser = d.printer.as_deref() == Some(crate::web_print::BROWSER_PRINTER);
                 ui.horizontal(|ui| {
+                    // Atlas fork: each size has its own printer and paper, below.
+                    if crate::atlas::print_routing::splitting(d) {
+                        ui.disable();
+                    }
                     let shown = match d.printer.as_deref() {
                         Some(p) => printer_label(p),
+                        // Atlas fork: the rules can't choose, and nothing else may.
+                        None if crate::atlas::print_routing::must_choose(d) => "Choose a printer…".to_string(),
+                        None if crate::atlas::print_routing::splitting(d) => "Chosen for each size below".to_string(),
                         None if still_looking(d) => tl!("Looking for printers…").to_string(),
                         None => tl!("Save as PDF").to_string(),
                     };
@@ -202,6 +211,9 @@ pub(crate) fn body(
                     ui.end_row();
                 }
                 let paper_label = ui.label(tl!("Paper:"));
+                if crate::atlas::print_routing::splitting(d) {
+                    ui.disable();
+                }
                 let paper_name = PAPERS.get(d.paper).map_or("US Letter", |p| p.0);
                 let before = d.paper;
                 craft_ui::ComboBox::from_id_salt("paper").selected_text(tl!(paper_name)).width(260.0).show_ui(ui, |ui| {
@@ -219,6 +231,8 @@ pub(crate) fn body(
                 }
                 ui.end_row();
             });
+            // Atlas fork: why this printer and paper.
+            crate::atlas::print_routing::panel(ui, d, t);
             // Windows says which drivers can't print two-sided as they're asked; they keep their
             // own setting, even when Two-sided is Off.
             if let Some(p) = d.printers.iter().find(|p| d.printer.as_ref() == Some(&p.name))
@@ -431,7 +445,15 @@ pub(crate) fn body(
                         .color(t.text_muted),
                     );
                 });
-        });
+        };
+        match crate::atlas::print_routing::settings_scroll_height(ui.ctx(), d_mixed) {
+            Some(height) => {
+                egui::ScrollArea::vertical().id_salt("print-settings").max_height(height).show(ui, |ui| ui.vertical(|ui| settings_column(ui)));
+            }
+            None => {
+                ui.vertical(|ui| settings_column(ui));
+            }
+        }
         ui.add_space(12.0);
         // Preview.
         ui.vertical(|ui| {
@@ -533,10 +555,14 @@ pub(crate) fn body(
         });
     });
     ui.add_space(12.0);
+    // Atlas fork: what the printer rules say about this printer and paper, before it is sent.
+    crate::atlas::print_routing::conflict_strip(ui, d);
     let (mut go, mut cancel) = (false, false);
     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-        let looking = still_looking(d);
+        let looking = still_looking(d) || crate::atlas::print_routing::blocks_print(d);
         let label = if d.printer.is_some() || looking { tl!("Print") } else { tl!("Save as PDF") };
+        let atlas_label = crate::atlas::print_routing::print_label(d);
+        let label = atlas_label.as_deref().unwrap_or(label);
         if ui.add_enabled_ui(settings.is_ok() && !sheets.is_empty() && !looking, |ui| widgets::pill_button(ui, label, true)).inner.clicked() {
             go = true;
         }

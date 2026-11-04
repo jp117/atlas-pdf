@@ -107,6 +107,8 @@ pub const SIDEWAYS: &[(&str, &str)] = &[
     ("ui-egui", "ui-common"),
     ("ui-egui", "platform"),
     ("automation", "platform"),
+    // Atlas fork: the printer rules read the paper list.
+    ("atlas", "print"),
 ];
 
 /// External crates that constitute a UI toolkit / windowing dependency (prefix match with `*`).

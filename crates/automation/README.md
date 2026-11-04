@@ -123,6 +123,11 @@ claude mcp add pdfcraft -- "$env:LOCALAPPDATA\Programs\ArtCraft\PdfCraft\pdfcraf
 claude mcp add pdfcraft -- pdfcraft-cli mcp --root <dir>
 ```
 
+## Printing by page size (Atlas fork)
+
+`doc_print` takes `paper` and `printer` set to `auto`; `print_plan` is the dry run, and `print_rules`
+and `print_rules_set` read and replace the rules. See [docs/printing-atlas.md](../../docs/printing-atlas.md).
+
 ## Adding a tool
 
 1. Add the engine capability first, with its tests (the tool is a thin adapter).

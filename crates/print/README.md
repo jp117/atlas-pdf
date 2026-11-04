@@ -37,6 +37,10 @@ annotations); sheets place them with a clip. The result is a fresh, unencrypted,
 garbage-collected file (callers check the print permission).
 Annotation appearances receive unused XObject names, preserving existing page resources even when they use the same naming prefix.
 
+Atlas fork: with printer rules in force, the paper and printer come from the pages' size, and this
+remembered paper only fills in for a size no standard paper matches
+([docs/printing-atlas.md](../../docs/printing-atlas.md)).
+
 The GUI Print dialog remembers its last selected paper size across application sessions,
 including when Print is cancelled. The preference stores a canonical name such as `A4`;
 unrecognized saved values retain the current selection (US Letter on a fresh app).

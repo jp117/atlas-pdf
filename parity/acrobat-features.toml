@@ -8081,11 +8081,11 @@ title = "Choose paper source by PDF page size"
 area = "L"
 tier = "P2"
 milestone = "M10"
-status = "planned"
-commands = []
-tools = []
-evidence = []
-notes = ""
+status = "shipped"
+commands = ["print.dialog"]
+tools = ["doc_print"]
+evidence = ["crates/atlas/src/print_rules.rs::a_page_is_its_paper_either_way_round_within_the_tolerance", "crates/atlas/src/print_rules.rs::the_wrong_printer_for_the_paper_is_a_conflict_with_a_fix", "crates/ui-egui/tests/it/print_rules.rs::the_dialog_preselects_the_printer_paper_and_actual_size_and_says_why", "crates/ui-egui/tests/it/print_rules.rs::the_last_used_paper_never_overrides_the_detected_size", "crates/ui-egui/tests/it/print_rules.rs::mixed_sizes_show_the_breakdown_and_offer_separate_jobs", "crates/automation/tests/it/atlas_print.rs::the_plan_reads_each_page_as_displayed", "crates/automation/tests/it/atlas_print.rs::mixed_sizes_are_never_put_on_one_paper_unasked"]
+notes = "Atlas fork, by routing rather than by paper source: editable rules map paper sizes to Windows printers, and each printer's saved source, roll width and rotate carry through (checked on held jobs by packaging/windows/test-print-hold.ps1 on a Canon TX-3200 and an HP M607 only). Mixed sizes go out as one job per size. print_plan, print_rules and print_rules_set are in the Atlas tool table. Choosing the paper source per job isn't implemented: a driver accepted it in validation, but craft-print can't put vendor features in a ticket (docs/printing-atlas.md). Saved colour settings don't carry through, since craft-print always states colour."
 
 [[feature]]
 id = "print.duplex"

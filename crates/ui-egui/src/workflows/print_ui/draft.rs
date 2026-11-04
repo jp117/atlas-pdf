@@ -83,6 +83,8 @@ pub struct PrintDraft {
     pub driver_options_loading: Option<String>,
     /// Properties… asked for this printer's options; the app starts the read on the next frame.
     pub read_options_for: Option<String>,
+    /// Atlas fork: following the printer rules.
+    pub routing: crate::atlas::print_routing::PrintRouting,
 }
 
 impl Default for PrintDraft {
@@ -131,6 +133,7 @@ impl Default for PrintDraft {
             crop_pages: None,
             driver_options_loading: None,
             read_options_for: None,
+            routing: Default::default(),
         }
     }
 }

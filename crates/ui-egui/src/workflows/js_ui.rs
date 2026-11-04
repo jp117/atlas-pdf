@@ -394,6 +394,9 @@ pub(crate) fn preferences_body(ui: &mut egui::Ui, app: &mut PdfCraftApp, t: &Tok
     ui.add_space(8.0);
     crate::appearance::preferences_section(ui, app, t);
     ui.add_space(8.0);
+    // Atlas fork: which printer each paper size goes to.
+    crate::atlas::print_rules_ui::section(ui, app, t);
+    ui.add_space(8.0);
     ui.label(egui::RichText::new(tl!("Documents and view")).font(theme::semibold(13.0)));
     ui.horizontal(|ui| {
         ui.label(tl!("Default workspace mode"));
