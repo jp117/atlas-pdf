@@ -25,7 +25,7 @@ pub(crate) enum RulesSource {
 }
 
 impl RulesSource {
-    fn load(&self) -> LoadedRules {
+    pub(super) fn load(&self) -> LoadedRules {
         match self {
             RulesSource::File(path) => PrinterRules::load(path),
             RulesSource::Fixed(rules) => LoadedRules { rules: rules.clone(), problem: None },
@@ -37,6 +37,10 @@ impl RulesSource {
 #[derive(Default)]
 pub(crate) struct PrintRulesState {
     pub(crate) source: Option<RulesSource>,
+    /// Preferences ▸ Printer rules, while it is open.
+    pub(crate) editor: Option<super::print_rules_ui::RulesEditor>,
+    /// Preferences has asked for the printer list.
+    pub(crate) asked_printers: bool,
 }
 
 impl PdfCraftApp {
@@ -48,6 +52,12 @@ impl PdfCraftApp {
     /// Follow these printer rules.
     pub fn use_print_rules(&mut self, rules: PrinterRules) {
         self.atlas.print.source = Some(RulesSource::Fixed(rules));
+    }
+
+    /// The printer list, for Preferences ▸ Printer rules, the way Print reads it.
+    pub(crate) fn refresh_printers_for_rules(&mut self) {
+        self.print_draft.printers_loading = true;
+        self.refresh_print_list();
     }
 }
 
@@ -108,6 +118,8 @@ pub struct PrintRouting {
     /// The pages to print, by size.
     pub plan: Plan,
     seen: Option<Seen>,
+    /// The person asked to edit the rules: Preferences opens instead.
+    pub open_rules: bool,
     /// Why this printer and paper, for the dialog to say.
     pub reason: Option<String>,
     /// No printer may be assumed: Print waits until one is chosen.
@@ -153,6 +165,8 @@ impl PrintRouting {
 /// Print has opened: start following the rules, when there are any to follow. The printer picked
 /// last time and the paper used last time don't carry over: the pages decide.
 pub(crate) fn on_open(app: &mut PdfCraftApp) {
+    // Preferences reads the file again next time, in case it changed.
+    app.atlas.print.editor = None;
     let Some(source) = &app.atlas.print.source else { return };
     let loaded = source.load();
     let d = &mut app.print_draft;
@@ -558,6 +572,9 @@ pub(crate) fn panel(ui: &mut egui::Ui, d: &mut PrintDraft, t: &Tokens) {
         ui.label(egui::RichText::new(problem.as_str()).small().color(t.text_muted));
     }
     mixed_panel(ui, d, t);
+    if ui.small_button("Printer rules…").on_hover_text("Choose which printer each paper size goes to").clicked() {
+        d.routing.open_rules = true;
+    }
 }
 
 #[cfg(test)]

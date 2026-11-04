@@ -458,3 +458,104 @@ fn too_many_sizes_to_send_apart_ask_for_one_paper() {
     assert_eq!(d.printer, None);
     assert!(!is_print_enabled(&h));
 }
+
+/// The app with a rules file, as the desktop app has one.
+fn harness_with_rules_file(file: std::path::PathBuf, pages: &[(u32, u32)]) -> Harness<'static, PdfCraftApp> {
+    let bytes = drawing(pages);
+    let mut h = Harness::builder().with_size(egui::vec2(1400.0, 1000.0)).build_eframe(move |_| {
+        let mut app = PdfCraftApp::new();
+        app.set_option("language", "en").unwrap();
+        app.use_print_rules_file(file.clone());
+        app.printer_source = Some(Arc::new(|| ALL.iter().map(|name| printer(name, *name == OFFICE)).collect()));
+        app.open_bytes("drawing.pdf", None, bytes.clone()).unwrap();
+        app
+    });
+    h.run_steps(4);
+    h
+}
+
+fn temp_rules_file(test: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("atlas-print-rules-ui-{test}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    dir.join("print-rules.json")
+}
+
+fn open_preferences(h: &mut Harness<'static, PdfCraftApp>) {
+    h.state_mut().dialog = Some(Dialog::Preferences);
+    for _ in 0..100 {
+        h.run_steps(1);
+        if !h.state().print_draft.printers_loading && !h.state().print_draft.printers.is_empty() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    h.run_steps(4);
+}
+
+#[test]
+fn preferences_edit_the_rules_the_print_dialog_follows() {
+    let file = temp_rules_file("edit");
+    let mut h = harness_with_rules_file(file.clone(), &[ARCH_C]);
+    open_preferences(&mut h);
+    h.get_by_label("Printer rules");
+    assert_eq!(h.get_by_label("Printer of rule 1").value().as_deref(), Some(CANON_C), "the starter rules");
+
+    // Send ARCH C to the other printer, and that is what is saved and followed.
+    h.get_by_label("Printer of rule 1").click();
+    h.run_steps(3);
+    h.get_all_by_label(CANON_D).last().unwrap().click();
+    h.run_steps(4);
+    let saved = PrinterRules::load(&file);
+    assert_eq!((saved.rules.printer_for(paper("ARCH C")), saved.problem), (Some(CANON_D), None));
+
+    h.state_mut().dialog = None;
+    h.run_steps(2);
+    open_print(&mut h);
+    assert_eq!(h.state().print_draft.printer.as_deref(), Some(CANON_D));
+    let _ = std::fs::remove_dir_all(file.parent().unwrap());
+}
+
+#[test]
+fn rules_can_be_added_removed_and_restored() {
+    let file = temp_rules_file("rows");
+    let mut h = harness_with_rules_file(file.clone(), &[ARCH_C]);
+    open_preferences(&mut h);
+    h.get_all_by_label("Remove").next().unwrap().click();
+    h.run_steps(4);
+    assert_eq!(PrinterRules::load(&file).rules.printer_for(paper("ARCH C")), None, "the first rule is gone");
+
+    h.get_by_label("Add rule").click();
+    h.run_steps(4);
+    h.get_by_value("Choose a printer…");
+    assert_eq!(PrinterRules::load(&file).rules.rules.len(), 4, "a rule with no printer isn't saved yet");
+
+    h.get_by_label("Restore starting rules").click();
+    h.run_steps(4);
+    assert_eq!(PrinterRules::load(&file).rules, PrinterRules::starter());
+    let _ = std::fs::remove_dir_all(file.parent().unwrap());
+}
+
+#[test]
+fn a_rules_file_that_cant_be_read_says_so_and_asks() {
+    let file = temp_rules_file("broken");
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(&file, "{ broken").unwrap();
+    let mut h = harness_with_rules_file(file.clone(), &[ARCH_C]);
+    open_print(&mut h);
+    assert_eq!(h.state().print_draft.printer, None, "no guess at a printer");
+    assert!(h.state().print_draft.routing.rules_problem.as_deref().unwrap().contains("can't be used"));
+    assert!(!is_print_enabled(&h));
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "{ broken", "opening Print doesn't rewrite it");
+    let _ = std::fs::remove_dir_all(file.parent().unwrap());
+}
+
+#[test]
+fn the_print_dialog_links_to_the_rules() {
+    let mut h = harness(&[ARCH_C]);
+    open_print(&mut h);
+    h.run_steps(6);
+    h.get_by_label("Printer rules…").click();
+    h.run_steps(6);
+    assert_eq!(h.state().dialog, Some(Dialog::Preferences));
+    h.get_by_label("Printer rules");
+}

@@ -220,6 +220,18 @@ impl PdfCraftApp {
         self.print_draft.crop_pages = Some(pages);
     }
 
+    /// Read the printer list the way Print does, for Preferences ▸ Printer rules. Atlas fork.
+    pub(crate) fn refresh_print_list(&mut self) {
+        match self.printer_source.clone() {
+            #[cfg(not(target_arch = "wasm32"))]
+            Some(source) => self.list_printers_in_background(source),
+            _ => {
+                self.print_draft.printers = listed_printers();
+                self.print_draft.printers_loading = false;
+            }
+        }
+    }
+
     #[cfg(not(target_arch = "wasm32"))]
     fn list_printers_in_background(&mut self, source: PrinterSource) {
         // A list already being read is as fresh as a new one would be.

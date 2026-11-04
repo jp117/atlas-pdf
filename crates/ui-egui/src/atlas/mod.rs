@@ -7,6 +7,7 @@
 
 mod layers_panel;
 pub(crate) mod print_routing;
+pub(crate) mod print_rules_ui;
 mod takeoff_panel;
 mod takeoff_tool;
 #[cfg(not(target_arch = "wasm32"))]

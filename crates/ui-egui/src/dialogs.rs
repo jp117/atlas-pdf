@@ -1293,6 +1293,10 @@ fn dialog_print(ui: &mut egui::Ui, app: &mut PdfCraftApp, req: &mut Pending) -> 
         view.need_thumbnail(p, true);
         view.page_preview(p)
     });
+    // Atlas fork: Preferences ▸ Printer rules.
+    if std::mem::take(&mut app.print_draft.routing.open_rules) {
+        req.next = Some(Dialog::Preferences);
+    }
     req.print_go = go;
     req.close = go || cancel;
     false
