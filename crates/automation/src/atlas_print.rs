@@ -234,7 +234,7 @@ impl Automation {
                             (Some(asked.to_string()), format!("{} detected; printer as asked: {asked}", group.size_name()))
                         }
                     };
-                    let title = if mixed { job_title(&title, group) } else { title.clone() };
+                    let title = if mixed { group.job_title(&title) } else { title.clone() };
                     jobs.push(PlannedJob { pages: group.pages.clone(), paper, printer, reason, options, title });
                 }
                 Ok(jobs)
@@ -309,12 +309,6 @@ impl Automation {
             }
         })
     }
-}
-
-/// The name a size's job goes by when a document is split.
-fn job_title(title: &str, group: &SizeGroup) -> String {
-    let stem = title.strip_suffix(".pdf").or_else(|| title.strip_suffix(".PDF")).unwrap_or(title);
-    format!("{stem} ({}).pdf", group.size_name())
 }
 
 /// Actual size for wide-format drawings of a size matched to their paper; otherwise `doc_print`'s
@@ -433,8 +427,8 @@ mod tests {
     #[test]
     fn jobs_of_a_split_document_are_named_for_their_size() {
         let group = SizeGroup { paper: print_rules::paper_named("ARCH C"), size: (1296.0, 1728.0), pages: vec![0], route: Route::NoRule };
-        assert_eq!(job_title("Plans.pdf", &group), "Plans (18 x 24).pdf");
-        assert_eq!(job_title("Plans", &group), "Plans (18 x 24).pdf");
+        assert_eq!(group.job_title("Plans.pdf"), "Plans (18 x 24).pdf");
+        assert_eq!(group.job_title("Plans"), "Plans (18 x 24).pdf");
     }
 
     #[test]

@@ -282,6 +282,12 @@ impl SizeGroup {
         }
     }
 
+    /// The name this size's job goes by when a document is sent as one job per size.
+    pub fn job_title(&self, title: &str) -> String {
+        let stem = title.strip_suffix(".pdf").or_else(|| title.strip_suffix(".PDF")).unwrap_or(title);
+        format!("{stem} ({}).pdf", self.size_name())
+    }
+
     /// Whether these pages are wide-format drawings.
     pub fn wide_format(&self) -> bool {
         is_wide_format(self.size)
