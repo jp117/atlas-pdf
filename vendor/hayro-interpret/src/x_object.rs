@@ -631,6 +631,8 @@ impl<'a> ImageXObject<'a> {
             // PdfCraft patch (32): see `decode_reads_target`.
             target: if self.decode_reads_target() {
                 target_dimension
+            } else if let Some(reduced) = self.reduced_jpeg_key(target_dimension) {
+                Some(reduced)
             } else {
                 None
             },
@@ -647,6 +649,32 @@ impl<'a> ImageXObject<'a> {
         uses_jpx(&self.stream)
             || dict.get::<Stream<'_>>(SMASK).is_some_and(|s| uses_jpx(&s))
             || dict.get::<Stream<'_>>(MASK).is_some_and(|s| uses_jpx(&s))
+    }
+
+    /// Atlas fork: what the decode takes from the target when this image or its soft mask is a
+    /// very large JPEG, which is decoded at a reduced size (`hayro_syntax::reduced_jpeg_divisor`):
+    /// by how much each is reduced, so the zooms that reduce them alike share a decode. `None`
+    /// when neither is reduced: one decode serves every zoom, as for any other filter.
+    fn reduced_jpeg_key(&self, target: Option<(u32, u32)>) -> Option<(u32, u32)> {
+        let image = if uses_jpeg(&self.stream) {
+            hayro_syntax::reduced_jpeg_divisor(self.width, self.height, target)
+        } else {
+            1
+        };
+        let mask = self.stream.dict().get::<Stream<'_>>(SMASK).map_or(1, |mask| {
+            let dict = mask.dict();
+            let size = dict
+                .get::<u32>(W)
+                .or_else(|| dict.get::<u32>(WIDTH))
+                .zip(dict.get::<u32>(H).or_else(|| dict.get::<u32>(HEIGHT)));
+            match size {
+                Some((width, height)) if uses_jpeg(&mask) => {
+                    hayro_syntax::reduced_jpeg_divisor(width, height, target)
+                }
+                _ => 1,
+            }
+        });
+        (image, mask).ne(&(1, 1)).then_some((image, mask))
     }
 
     pub(crate) fn width(&self) -> u32 {
@@ -676,6 +704,11 @@ fn decoded_mask_size(mask: &DecodedMask) -> usize {
 /// PdfCraft patch (32): whether `stream` names the JPX filter, as a name or in an array, under
 /// `/Filter` or its inline abbreviation `/F`. Errs towards `true`: a name the decoder would
 /// ignore still counts, which only keeps the target in the key as before.
+/// Atlas fork: whether `stream` is a JPEG (see `reduced_jpeg_key`).
+fn uses_jpeg(stream: &Stream<'_>) -> bool {
+    uses_filter(stream, DCT_DECODE) || uses_filter(stream, DCT_DECODE_ABBREVIATION)
+}
+
 fn uses_jpx(stream: &Stream<'_>) -> bool {
     uses_filter(stream, JPX_DECODE)
 }

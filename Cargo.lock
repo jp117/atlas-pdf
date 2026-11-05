@@ -2766,6 +2766,7 @@ dependencies = [
  "hayro-ccitt",
  "hayro-jbig2",
  "hayro-jpeg2000",
+ "jpeg-decoder",
  "memchr",
  "rustc-hash 2.1.3",
  "smallvec",
@@ -3272,6 +3273,12 @@ dependencies = [
  "getrandom 0.4.3",
  "libc",
 ]
+
+[[package]]
+name = "jpeg-decoder"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "00810f1d8b74be64b13dbf3db89ac67740615d6c891f0e7b6179326533011a07"
 
 [[package]]
 name = "js-sys"
@@ -4652,6 +4659,7 @@ dependencies = [
  "getrandom 0.4.3",
  "hayro",
  "hayro-syntax",
+ "image",
  "kurbo 0.13.1",
  "log",
  "lopdf",

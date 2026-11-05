@@ -8307,6 +8307,159 @@ fn a_renderers_renders_share_their_decoded_images() {
     assert_eq!(r.images.decodes(), 1, "three renders of the page decode its scan once");
 }
 
+/// Atlas fork: a one-page PDF filling the page with a `side` x `side` JPEG under a same-size JPEG
+/// soft mask, if asked, and what its dictionaries add (`extra`, on both).
+fn large_jpeg_pdf(side: u32, jpeg: &[u8], mask: Option<&[u8]>, extra: &str, declared: Option<u32>) -> Vec<u8> {
+    let content = format!("q {side} 0 0 {side} 0 0 cm /Im Do Q");
+    let width = declared.unwrap_or(side);
+    let smask = if mask.is_some() { "/SMask 6 0 R" } else { "" };
+    let mut pdf = format!(
+        "%PDF-1.7\n\
+1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n\
+2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj\n\
+3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 {side} {side}] /Contents 4 0 R /Resources << /XObject << /Im 5 0 R >> >> >> endobj\n\
+4 0 obj << /Length {} >> stream\n{content}\nendstream endobj\n\
+5 0 obj << /Type /XObject /Subtype /Image /Width {width} /Height {side} /ColorSpace /DeviceRGB /BitsPerComponent 8 /Filter /DCTDecode {smask} {extra} /Length {} >> stream\n",
+        content.len(),
+        jpeg.len()
+    )
+    .into_bytes();
+    pdf.extend_from_slice(jpeg);
+    pdf.extend_from_slice(b"\nendstream endobj\n");
+    if let Some(mask) = mask {
+        pdf.extend(
+            format!(
+                "6 0 obj << /Type /XObject /Subtype /Image /Width {side} /Height {side} /ColorSpace /DeviceGray /BitsPerComponent 8 /Filter /DCTDecode {extra} /Length {} >> stream\n",
+                mask.len()
+            )
+            .bytes(),
+        );
+        pdf.extend_from_slice(mask);
+        pdf.extend_from_slice(b"\nendstream endobj\n");
+    }
+    pdf.extend_from_slice(b"trailer << /Root 1 0 R >>\n%%EOF\n");
+    pdf
+}
+
+/// Atlas fork: a `side` x `side` JPEG of large soft bands of colour, or grey without `rgb`.
+fn large_jpeg(side: u32, rgb: bool) -> Vec<u8> {
+    let (channels, kind) = if rgb { (3, image::ExtendedColorType::Rgb8) } else { (1, image::ExtendedColorType::L8) };
+    let mut pixels = Vec::with_capacity((side * side) as usize * channels);
+    for y in 0..side {
+        for x in 0..side {
+            let (band_x, band_y) = ((x / 512) as u8, (y / 512) as u8);
+            if rgb {
+                pixels.extend_from_slice(&[band_x * 28, band_y * 28, 200 - band_x * 12]);
+            } else {
+                pixels.push(if (band_x + band_y) % 2 == 0 { 255 } else { 120 });
+            }
+        }
+    }
+    let mut out = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 90).encode(&pixels, side, side, kind).expect("encodes");
+    out
+}
+
+/// Atlas fork: at what size a very large JPEG is decoded, by the size it is drawn.
+#[test]
+fn a_large_jpeg_is_reduced_only_as_far_as_its_drawn_size_allows() {
+    use hayro_syntax::reduced_jpeg_divisor as divisor;
+    let drawing = |t| divisor(12600, 9000, t);
+    assert_eq!(drawing(None), 1, "no size asked for: export and extraction take every pixel");
+    assert_eq!(drawing(Some((978, 699))), 8);
+    assert_eq!(drawing(Some((1575, 1125))), 8, "an eighth still covers it");
+    assert_eq!(drawing(Some((1576, 1125))), 4, "both sides must be covered");
+    assert_eq!(drawing(Some((1575, 1126))), 4);
+    assert_eq!(drawing(Some((6300, 4500))), 2);
+    assert_eq!(drawing(Some((6301, 4500))), 1);
+    assert_eq!(drawing(Some((20000, 20000))), 1, "enlarged");
+    assert_eq!(drawing(Some((0, 699))), 1, "an empty target");
+    assert_eq!(divisor(3000, 3000, Some((10, 10))), 1, "small JPEGs decode whole");
+    assert_eq!(divisor(65535, 65535, Some((1, 1))), 8);
+    assert_eq!(divisor(u32::MAX, u32::MAX, Some((u32::MAX, u32::MAX))), 1, "nothing overflows");
+    assert_eq!(divisor(u32::MAX, u32::MAX, Some((1, 1))), 8);
+}
+
+/// Atlas fork: drawn small, a very large JPEG under a JPEG mask looks as it does decoded whole,
+/// and zooms that reduce it alike share a decode. An explicit `/ColorTransform` goes the whole way,
+/// which gives what to compare with.
+#[test]
+fn a_large_jpeg_decoded_reduced_looks_as_it_does_decoded_whole() {
+    let side = 4096;
+    let (color, alpha) = (large_jpeg(side, true), large_jpeg(side, false));
+    let mut reduced = PageRenderer::new(Arc::new(large_jpeg_pdf(side, &color, Some(&alpha), "", None)), RenderConfig::default());
+    let mut whole = PageRenderer::new(
+        Arc::new(large_jpeg_pdf(side, &color, Some(&alpha), "/DecodeParms << /ColorTransform 1 >>", None)),
+        RenderConfig::default(),
+    );
+    // Drawn at a tenth, an eighth of each side is decoded: a sixty-fourth of the pixels.
+    let full_size = (side * side * 4) as usize;
+    for (r, smaller) in [(&mut reduced, true), (&mut whole, false)] {
+        let page = r.render(RenderRequest { page: 0, scale: 0.1, ..Default::default() });
+        assert!(page.error.is_none(), "{:?}", page.error);
+        assert_eq!(r.images.bytes() <= full_size / 32, smaller, "{} bytes held", r.images.bytes());
+    }
+    for scale in [0.1_f32, 0.2, 0.45] {
+        let a = reduced.render(RenderRequest { page: 0, scale, ..Default::default() });
+        let b = whole.render(RenderRequest { page: 0, scale, ..Default::default() });
+        assert!(a.error.is_none() && b.error.is_none(), "{:?} {:?}", a.error, b.error);
+        assert_eq!((a.width, a.height), (b.width, b.height));
+        assert!(a.rgba.iter().step_by(4).any(|v| *v != 255), "the image is drawn");
+        let differences: Vec<u32> = a.rgba.iter().zip(b.rgba.iter()).map(|(x, y)| u32::from(x.abs_diff(*y))).collect();
+        let mean = f64::from(differences.iter().sum::<u32>()) / differences.len() as f64;
+        assert!(mean < 2.0, "at {scale} the mean difference is {mean}");
+    }
+    assert_eq!(reduced.images.decodes(), 3, "an eighth, a quarter and a half are three decodes");
+    let before = reduced.images.decodes();
+    for scale in [0.11_f32, 0.12] {
+        let page = reduced.render(RenderRequest { page: 0, scale, ..Default::default() });
+        assert!(page.error.is_none(), "{:?}", page.error);
+    }
+    assert_eq!(reduced.images.decodes(), before, "more zooms within an eighth reuse that decode");
+}
+
+/// Atlas fork: tiles of a reduced JPEG join up as the whole page does at that zoom.
+#[test]
+fn tiles_of_a_reduced_jpeg_match_the_whole_page() {
+    let side = 4096;
+    let (color, alpha) = (large_jpeg(side, true), large_jpeg(side, false));
+    let mut r = PageRenderer::new(Arc::new(large_jpeg_pdf(side, &color, Some(&alpha), "", None)), RenderConfig::default());
+    let scale = 0.17;
+    let full = r.render(RenderRequest { page: 0, scale, ..Default::default() });
+    assert!(full.error.is_none(), "{:?}", full.error);
+    let fw = full.width;
+    let tile = Tile { x: 137, y: 91, w: 256, h: 200 };
+    let part = r.render(RenderRequest { page: 0, scale, tile: Some(tile), ..Default::default() });
+    assert!(part.error.is_none(), "{:?}", part.error);
+    for y in 0..tile.h {
+        for x in 0..tile.w {
+            let whole = &full.rgba[(((y + tile.y) * fw + x + tile.x) * 4) as usize..][..4];
+            assert_eq!(&part.rgba[((y * tile.w + x) * 4) as usize..][..4], whole, "pixel {x},{y}");
+        }
+    }
+    assert_eq!(r.images.decodes(), 1, "the tile shares the whole page's decode");
+}
+
+/// Atlas fork: a JPEG whose header disagrees with its dictionary falls back on the lenient whole
+/// decode, as does a damaged one, so it still draws what it can and nothing panics.
+#[test]
+fn an_unusual_large_jpeg_goes_the_whole_way() {
+    let side = 4096;
+    let color = large_jpeg(side, true);
+    let scale = 0.1;
+    let declared = large_jpeg_pdf(side, &color, None, "", Some(side - 8));
+    let mut r = PageRenderer::new(Arc::new(declared), RenderConfig::default());
+    let page = r.render(RenderRequest { page: 0, scale, ..Default::default() });
+    assert!(page.error.is_none(), "{:?}", page.error);
+    assert!(page.rgba.iter().step_by(4).any(|v| *v != 255), "the image is drawn");
+
+    // Cut short: no panic, whatever is left of it.
+    let cut = &color[..color.len() / 2];
+    let mut r = PageRenderer::new(Arc::new(large_jpeg_pdf(side, cut, None, "", None)), RenderConfig::default());
+    let page = r.render(RenderRequest { page: 0, scale, ..Default::default() });
+    assert!(page.error.is_none(), "{:?}", page.error);
+}
+
 /// Atlas fork: pages that draw the named images of `images` (each `side` × `side`, grey), one
 /// page per list of names.
 fn pages_of_images_pdf(side: usize, images: &[&str], pages: &[&[&str]]) -> Vec<u8> {

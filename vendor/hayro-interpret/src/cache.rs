@@ -316,6 +316,12 @@ impl SharedImageCache {
     pub fn decodes(&self) -> usize {
         self.0.inner.0.lock().map_or(0, |inner| inner.decodes)
     }
+
+    /// Atlas fork: how many bytes of decoded pixels the cache holds, for PdfCraft's tests.
+    #[doc(hidden)]
+    pub fn bytes(&self) -> usize {
+        self.0.inner.0.lock().map_or(0, |inner| inner.bytes)
+    }
 }
 
 /// A trait for objects that can generate a unique cache key.

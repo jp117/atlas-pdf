@@ -8,6 +8,100 @@ use zune_jpeg::zune_core::colorspace::ColorSpace;
 use zune_jpeg::zune_core::colorspace::ColorSpace::CMYK;
 use zune_jpeg::zune_core::options::DecoderOptions;
 
+/// Atlas fork: the fewest pixels at which a JPEG is decoded at a reduced size. Smaller ones decode
+/// fast enough whole, and stay exactly as they were.
+const REDUCED_DECODE_MIN_PIXELS: u64 = 16_000_000;
+
+/// Atlas fork: by how much a `width` x `height` JPEG is reduced when decoded for `target` device
+/// pixels: 8, 4 or 2 where that still gives at least `target` on both sides (a JPEG's blocks can
+/// be decoded at those sizes without working out their full pixels), else 1. A 12600 x 9000
+/// drawing and its mask held 432 MB decoded and took 420 ms, on every page they were drawn at
+/// about 1000 pixels wide; at an eighth they hold 6 MB, in half the time, and every later shrink
+/// has 64 times fewer samples to go through.
+pub fn reduced_jpeg_divisor(width: u32, height: u32, target: Option<(u32, u32)>) -> u32 {
+    let Some((target_width, target_height)) = target else {
+        return 1;
+    };
+    if u64::from(width).saturating_mul(u64::from(height)) < REDUCED_DECODE_MIN_PIXELS
+        || target_width == 0
+        || target_height == 0
+    {
+        return 1;
+    }
+    [8, 4, 2]
+        .into_iter()
+        .find(|d| width.div_ceil(*d) >= target_width && height.div_ceil(*d) >= target_height)
+        .unwrap_or(1)
+}
+
+/// Atlas fork: the JPEG decoded at [`reduced_jpeg_divisor`]'s size. `None` when it isn't reduced or
+/// is anything out of the ordinary (not plain grey or YCbCr/RGB, an explicit `/ColorTransform`,
+/// a header that disagrees with the image dictionary, damage): [`decode`], which is lenient about
+/// all of those, decodes it whole.
+#[cfg(feature = "std")]
+fn decode_reduced(
+    data: &[u8],
+    params: &Dict<'_>,
+    image_params: &ImageDecodeParams,
+) -> Option<FilterResult<'static>> {
+    use jpeg_decoder::PixelFormat;
+
+    let (width, height) = (image_params.width, image_params.height);
+    let divisor = reduced_jpeg_divisor(width, height, image_params.target_dimension);
+    if divisor == 1
+        || image_params.is_indexed
+        || !image_params.bpc.is_none_or(|bpc| bpc == 8)
+        || params.get::<u8>(COLOR_TRANSFORM).is_some()
+    {
+        return None;
+    }
+    let mut decoder = jpeg_decoder::Decoder::new(data);
+    decoder.read_info().ok()?;
+    let info = decoder.info()?;
+    if (u32::from(info.width), u32::from(info.height)) != (width, height) {
+        return None;
+    }
+    let (channels, color_space) = match info.pixel_format {
+        PixelFormat::L8 => (1, ImageColorSpace::Gray),
+        PixelFormat::RGB24 => (3, ImageColorSpace::Rgb),
+        _ => return None,
+    };
+    if image_params.num_components.is_some_and(|n| usize::from(n) != channels) {
+        return None;
+    }
+    let wanted = (width.div_ceil(divisor), height.div_ceil(divisor));
+    let scaled = decoder
+        .scale(u16::try_from(wanted.0).ok()?, u16::try_from(wanted.1).ok()?)
+        .ok()?;
+    if (u32::from(scaled.0), u32::from(scaled.1)) != wanted {
+        return None;
+    }
+    let decoded = decoder.decode().ok()?;
+    let expected = (wanted.0 as usize).checked_mul(wanted.1 as usize)?.checked_mul(channels)?;
+    if decoded.len() != expected {
+        return None;
+    }
+    Some(FilterResult {
+        data: Cow::Owned(decoded),
+        image_data: Some(ImageData {
+            alpha: None,
+            color_space: Some(color_space),
+            bits_per_component: 8,
+            width: wanted.0,
+            height: wanted.1,
+        }),
+    })
+}
+
+#[cfg(not(feature = "std"))]
+fn decode_reduced(
+    _: &[u8],
+    _: &Dict<'_>,
+    _: &ImageDecodeParams,
+) -> Option<FilterResult<'static>> {
+    None
+}
+
 pub(crate) fn decode(
     data: &[u8],
     params: &Dict<'_>,
@@ -15,6 +109,9 @@ pub(crate) fn decode(
 ) -> Option<FilterResult<'static>> {
     if image_params.width > u16::MAX as u32 || image_params.height > u16::MAX as u32 {
         return None;
+    }
+    if let Some(reduced) = decode_reduced(data, params, image_params) {
+        return Some(reduced);
     }
 
     // Some PDFs have weird JPEGs where the JPEG metadata is completely wrong

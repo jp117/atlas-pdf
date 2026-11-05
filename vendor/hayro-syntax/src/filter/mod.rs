@@ -7,6 +7,8 @@ mod ccitt;
 #[cfg(feature = "images")]
 mod dct;
 #[cfg(feature = "images")]
+pub use dct::reduced_jpeg_divisor;
+#[cfg(feature = "images")]
 mod jbig2;
 #[cfg(feature = "images")]
 pub use jbig2::{MAX_PAGE_JBIG2_WORK, page_jbig2_work_spent};
