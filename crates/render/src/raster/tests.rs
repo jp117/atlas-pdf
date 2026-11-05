@@ -8397,6 +8397,10 @@ fn an_image_over_the_whole_budget_draws_and_evicts_nothing() {
     assert_eq!(decodes_rendering(&mut r, &[1]), 2, "it decodes each time");
 }
 
+/// Atlas fork: the pool's budget holds a 12600 x 9000 drawing with its mask, decoded whole when
+/// zoomed in (450 MB), so its tiles share one decode.
+#[cfg(not(target_arch = "wasm32"))]
+const _: () = assert!(SHARED_IMAGE_BYTES >= 450 << 20);
 
 /// A page under a large scan decodes it once for all its tiles, zooms and previews (vendored
 /// hayro-interpret patch: decoded images are kept by a renderer across its renders, keyed

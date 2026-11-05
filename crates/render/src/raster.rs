@@ -174,11 +174,16 @@ fn japanese_face(name: &str, serif: bool, bold: bool) -> JapaneseFace {
     }
 }
 
-/// Bytes of decoded image pixels a renderer keeps for all its renders (and a pool for all its
-/// workers) to share: room for a full-page scan of a large drawing sheet (a 12353 × 8999
-/// greyscale scan holds 111 MB; an ARCH D sheet scanned in colour at 300 dpi, 233 MB), so its
-/// tiles and zooms decode it once between them. Each pool worker used to keep 64 MiB of its own,
-/// up to 448 MiB over seven, and none of them could keep such a scan.
+/// Decoded pixels a render pool keeps, images used longest ago going first. Atlas fork: this holds
+/// the page in view on a drawing set: a page of 30 masked strips decodes to 570 MB, and a
+/// 12600 x 9000 drawing with its mask to 450 MB when zoomed in (drawn smaller, a very large JPEG
+/// is decoded smaller). Under 256 MiB such pages decoded again at every zoom: on a real set,
+/// 400% on such a drawing took 1.3 s at 256 MiB and 0.4 s at 512 MiB; 1 GiB saved little more
+/// and held 400 MB more.
+#[cfg(not(target_arch = "wasm32"))]
+const SHARED_IMAGE_BYTES: usize = 512 << 20;
+/// The web build has a 4 GiB address space at most, and the page's memory never shrinks.
+#[cfg(target_arch = "wasm32")]
 const SHARED_IMAGE_BYTES: usize = 256 << 20;
 
 /// Decoded images shared by a pool's workers (see [`SHARED_IMAGE_BYTES`]).
