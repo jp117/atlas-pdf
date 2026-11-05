@@ -20,7 +20,7 @@ use pdfcraft_engine::{DocId, Document, Edit};
 
 pub(crate) use layers_panel::{apply as apply_layers, show as layers_panel};
 pub(crate) use takeoff_panel::side_panel as takeoff_side_panel;
-pub(crate) use takeoff_tool::page;
+pub(crate) use takeoff_tool::{TakeoffInput, page};
 
 /// Atlas's per-window state.
 #[derive(Default)]

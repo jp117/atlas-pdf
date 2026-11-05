@@ -6,6 +6,8 @@
 use super::AtlasState;
 use crate::QuickTool;
 use crate::canvas::{DocView, PageXform};
+use crate::page_cursor::Layer;
+use crate::page_pointer::PagePointer;
 use egui::{Color32, Pos2, Rect, Stroke};
 use pdfcraft_atlas::takeoff::{Mark, NewMark, Status};
 use pdfcraft_engine::{DocId, Document, Edit};
@@ -32,19 +34,22 @@ pub(crate) fn color(status: Status) -> Color32 {
 
 /// One page's takeoff input; called for every visible page.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn page(
-    ui: &egui::Ui,
-    resp: &egui::Response,
-    doc: &Document,
-    view: &mut DocView,
-    xf: &PageXform,
-    page: usize,
-    state: &mut AtlasState,
-    tool: QuickTool,
-    author: &str,
-) {
-    if let QuickTool::Takeoff(status) = tool {
-        draw_input(ui, resp, doc, view, xf, page, state, status, author);
+/// What one page gives the takeoff tool this frame. `free`: a press there is nobody's.
+pub(crate) struct TakeoffInput<'a> {
+    pub ui: &'a egui::Ui,
+    pub resp: &'a egui::Response,
+    pub doc: &'a Document,
+    pub xf: &'a PageXform,
+    pub ptr: &'a PagePointer,
+    pub page: usize,
+    pub free: bool,
+    pub tool: QuickTool,
+    pub author: &'a str,
+}
+
+pub(crate) fn page(input: TakeoffInput<'_>, view: &mut DocView, state: &mut AtlasState) {
+    if let QuickTool::Takeoff(status) = input.tool {
+        draw_input(input, view, state, status);
     }
 }
 
@@ -52,52 +57,47 @@ fn screen(xf: &PageXform, v: [f32; 2]) -> Pos2 {
     xf.norm_to_screen(v[0] / xf.pw, v[1] / xf.ph)
 }
 
-#[allow(clippy::too_many_arguments)]
-fn draw_input(
-    ui: &egui::Ui,
-    resp: &egui::Response,
-    doc: &Document,
-    view: &mut DocView,
-    xf: &PageXform,
-    page: usize,
-    state: &mut AtlasState,
-    status: Status,
-    author: &str,
-) {
+fn draw_input(input: TakeoffInput<'_>, view: &mut DocView, state: &mut AtlasState, status: Status) {
+    let TakeoffInput { ui, resp, doc, xf, ptr, page, free, author, .. } = input;
     let Some(info) = doc.info.pages.get(page) else { return };
-    let over = ui.input(|i| i.pointer.hover_pos()).is_some_and(|p| xf.rect.contains(p));
+    // The pointer, while it is on this page and the pages have it.
+    let pointer = ptr.within(xf.rect);
     if !doc.allows_annotation() {
-        if over {
-            ui.ctx().set_cursor_icon(egui::CursorIcon::NotAllowed);
+        if pointer.is_some() {
+            view.cursor.claim(Layer::ToolArea, egui::CursorIcon::NotAllowed);
         }
         return;
     }
     let id = view.id;
     // The box under the pointer, if any: a click selects it.
-    let pointer = ui.input(|i| i.pointer.hover_pos()).filter(|p| xf.rect.contains(*p));
     let hit = pointer.and_then(|p| {
         let (vx, vy) = xf.screen_to_view(p);
         let [x, y] = info.view_to_user(vx, vy);
         let marks = state.listing(id, doc).map(|l| l.marks.as_slice()).unwrap_or_default();
         mark_at(marks, page, f64::from(x), f64::from(y))
     });
-    if over {
+    if pointer.is_some() {
         let dragging = state.drag.as_ref().is_some_and(|d| d.doc == id && d.page == page);
         let cursor = if hit.is_some() && !dragging { egui::CursorIcon::PointingHand } else { egui::CursorIcon::Crosshair };
-        ui.ctx().set_cursor_icon(cursor);
+        view.cursor.claim(Layer::ToolArea, cursor);
     }
-    if resp.clicked() && pointer.is_some() {
+    if free && resp.clicked() && pointer.is_some() {
         view.comments.selected = hit.map(|index| (page, index));
     }
-    if resp.drag_started()
-        && let Some(origin) = ui.input(|i| i.pointer.press_origin()).filter(|p| xf.rect.contains(*p))
+    if free
+        && resp.drag_started_by(egui::PointerButton::Primary)
+        && let Some(origin) = ptr.origin.filter(|p| xf.rect.contains(*p))
     {
         let (x, y) = xf.screen_to_view(origin);
         state.drag = Some(Drag { doc: id, page, start: [x, y], end: [x, y] });
     }
     let ours = |d: &Drag| d.doc == id && d.page == page;
+    // A press Escape cancelled never reports its release: the box goes with the button.
+    if !ptr.primary_down && !resp.drag_stopped() {
+        state.drag.take_if(|d| ours(d));
+    }
     if let Some(d) = state.drag.as_mut().filter(|d| ours(d)) {
-        if let Some(p) = ui.input(|i| i.pointer.interact_pos()) {
+        if let Some(p) = ptr.pos {
             let (x, y) = xf.screen_to_view(xf.rect.clamp(p));
             d.end = [x, y];
         }

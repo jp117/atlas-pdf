@@ -32,6 +32,7 @@ This crate has one optional feature:
 mod log;
 
 mod cache;
+mod cmyk_group;
 mod context;
 mod convert;
 mod device;
@@ -55,6 +56,7 @@ pub mod util;
 pub use cache::CacheKey;
 // PdfCraft patch: decoded images shared by a render pool's threads.
 pub use cache::SharedImageCache;
+pub use cmyk_group::CmykGroup;
 pub use context::*;
 pub use device::*;
 pub use function::Function;

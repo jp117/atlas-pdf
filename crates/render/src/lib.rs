@@ -15,6 +15,7 @@ mod reading;
 // Atlas fork: AutoCAD SHX text is drawing text, not comments.
 pub mod shx;
 mod structure;
+mod system_font;
 pub mod text;
 pub mod transition;
 

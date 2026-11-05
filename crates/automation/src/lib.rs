@@ -20,6 +20,7 @@ mod atlas;
 // Atlas fork: printing by the printer rules.
 mod atlas_print;
 mod batch;
+mod bates;
 mod comments;
 mod content;
 mod conventions;
@@ -30,6 +31,8 @@ mod links;
 #[cfg(feature = "mcp")]
 pub mod mcp;
 mod measure;
+mod model3d;
+mod model_render;
 mod printing;
 mod reading;
 mod redact;
@@ -53,6 +56,7 @@ use file_access::foreign_share;
 use text_cache::TextCache;
 
 mod assemble;
+mod bookmark_io;
 mod dispatch;
 mod documents;
 mod error;
@@ -66,7 +70,7 @@ use error::{Result, failed};
 pub(crate) use json::destination;
 pub use json::view_rect;
 use json::{Args, info, summary};
-use pages::{DEFAULT_DPI, MAX_DPI, encode_png};
+use pages::{DEFAULT_DPI, MAX_DPI, encode_png, rendered_content};
 #[cfg(test)]
 use pages::{FIND_FIRST_BATCH, FIND_MAX_WARNING_BYTES, FIND_MAX_WARNINGS, extract_parallel};
 #[cfg(test)]

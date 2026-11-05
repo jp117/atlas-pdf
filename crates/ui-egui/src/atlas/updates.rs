@@ -75,7 +75,10 @@ pub(crate) fn poll(app: &mut PdfCraftApp) {
     }
     if !app.atlas.updates.started {
         app.atlas.updates.started = true;
-        start_check(app);
+        // Preferences can turn the check at start off; Help ▸ Check for updates still asks.
+        if app.update_check_at_start {
+            start_check(app);
+        }
     }
     let checked = match &app.atlas.updates.stage {
         Stage::Checking(rx) => received(rx),
