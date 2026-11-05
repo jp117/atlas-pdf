@@ -573,8 +573,81 @@ fn area_shrink_window<const N: usize>(
     })
 }
 
-/// Atlas fork: `window` of the area-shrunk image as premultiplied RGBA. See [`area_shrink_window`].
+/// Atlas fork: source samples below which a shrink stays on the thread drawing the page.
+const SHRINK_SAMPLES_PER_BAND: u64 = 1_000_000;
+
+/// Atlas fork: the most threads one shrink takes.
+const MAX_SHRINK_BANDS: u32 = 8;
+
+/// Atlas fork: how many bands to cut a shrink of `window` into: one per
+/// [`SHRINK_SAMPLES_PER_BAND`] source samples it covers, within the machine's threads and the
+/// window's rows. 113 million samples took 700 ms on one thread, on every new zoom of a page.
+fn shrink_bands(source: (u32, u32), target: (u32, u32), window: Window) -> u32 {
+    let samples = u128::from(source.0) * u128::from(source.1) * u128::from(window.width()) * u128::from(window.height())
+        / (u128::from(target.0.max(1)) * u128::from(target.1.max(1)));
+    let wanted = u32::try_from(samples / u128::from(SHRINK_SAMPLES_PER_BAND)).unwrap_or(u32::MAX);
+    let threads = std::thread::available_parallelism().map_or(1, |n| u32::try_from(n.get()).unwrap_or(u32::MAX));
+    wanted.min(threads).min(MAX_SHRINK_BANDS).min(window.height()).max(1)
+}
+
+/// Atlas fork: `window` of the area-shrunk image as premultiplied RGBA, on as many threads as it
+/// is worth. See [`area_shrink_window`].
 fn area_window_rgba(
+    image: &ImageData,
+    alpha: Option<&LumaData>,
+    source: (u32, u32),
+    target: (u32, u32),
+    window: Window,
+) -> Option<Vec<u8>> {
+    let bands = shrink_bands(source, target, window);
+    area_window_rgba_in_bands(image, alpha, source, target, window, bands)
+}
+
+/// Atlas fork: [`area_window_rgba`] in `bands` bands of rows. A band's samples don't depend on the
+/// others, so the bands join without a seam. A thread that can't be had (the web has none) leaves
+/// its band to this one, so the image draws all the same.
+fn area_window_rgba_in_bands(
+    image: &ImageData,
+    alpha: Option<&LumaData>,
+    source: (u32, u32),
+    target: (u32, u32),
+    window: Window,
+    bands: u32,
+) -> Option<Vec<u8>> {
+    let height = window.height();
+    let bands = bands.clamp(1, height.max(1));
+    if bands == 1 {
+        return area_band_rgba(image, alpha, source, target, window);
+    }
+    let band = |i: u32| {
+        // At most 2^16 rows times 8 bands, so this fits.
+        let row = |i: u32| window.y0 + (u64::from(height) * u64::from(i) / u64::from(bands)) as u32;
+        Window { y0: row(i), y1: row(i + 1), ..window }
+    };
+    let parts: Vec<Option<Vec<u8>>> = std::thread::scope(|scope| {
+        let work = move |w: Window| area_band_rgba(image, alpha, source, target, w);
+        let spawned: Vec<_> = (1..bands)
+            .map(|i| {
+                let w = band(i);
+                (w, std::thread::Builder::new().spawn_scoped(scope, move || work(w)))
+            })
+            .collect();
+        let mut parts = vec![work(band(0))];
+        for (w, handle) in spawned {
+            // A band whose thread didn't start or stopped is worked out here.
+            parts.push(handle.ok().and_then(|h| h.join().ok()).unwrap_or_else(|| work(w)));
+        }
+        parts
+    });
+    let mut rgba = image_buffer(image_byte_len(window.width(), height, 4, MAX_IMAGE_PIXELS)?)?;
+    for part in parts {
+        rgba.extend_from_slice(&part?);
+    }
+    Some(rgba)
+}
+
+/// Atlas fork: one band of [`area_window_rgba`].
+fn area_band_rgba(
     image: &ImageData,
     alpha: Option<&LumaData>,
     source: (u32, u32),
@@ -3297,9 +3370,10 @@ mod snap_tests {
 #[cfg(test)]
 mod area_shrink_tests {
     use super::{
-        AREA_ONE, AreaAxis, ImageData, LumaData, MAX_IMAGE_PIXELS, RgbData, Window, area_shrink,
-        area_shrink_premultiplied, area_shrink_premultiplied_window, area_shrink_window, area_taps,
-        area_window_rgba, mask_on_image_grid, premultiply_rgba,
+        AREA_ONE, AreaAxis, ImageData, LumaData, MAX_IMAGE_PIXELS, MAX_SHRINK_BANDS, RgbData,
+        SHRINK_SAMPLES_PER_BAND, Window, area_shrink, area_shrink_premultiplied,
+        area_shrink_premultiplied_window, area_shrink_window, area_taps, area_window_rgba,
+        area_window_rgba_in_bands, mask_on_image_grid, premultiply_rgba, shrink_bands,
     };
 
     /// Atlas fork: the part of `whole` (`size`, `N` channels) under `window`.
@@ -3362,6 +3436,42 @@ mod area_shrink_tests {
         let shrunk = area_shrink_window::<1>(&gray, source, target, window).expect("gray");
         let expected: Vec<u8> = shrunk.iter().flat_map(|g| [*g, *g, *g, 255]).collect();
         assert_eq!(rgba, expected);
+    }
+
+    /// Atlas fork: however a shrink is cut into bands, the bands join into the same samples.
+    #[test]
+    fn bands_join_into_the_same_shrink() {
+        let (source, target) = ((97, 61), (29, 17));
+        let rgb = noise(97 * 61 * 3, 51);
+        let alpha = LumaData { data: noise(97 * 61, 52), width: 97, height: 61, interpolate: false, scale_factors: (1.0, 1.0) };
+        let color = ImageData::Rgb(RgbData { data: rgb, width: 97, height: 61, interpolate: false, scale_factors: (1.0, 1.0) });
+        let gray = ImageData::Luma(LumaData { data: noise(97 * 61, 53), width: 97, height: 61, interpolate: false, scale_factors: (1.0, 1.0) });
+        for window in windows_of(target) {
+            for (image, mask) in [(&color, Some(&alpha)), (&color, None), (&gray, None), (&gray, Some(&alpha))] {
+                let one = area_window_rgba_in_bands(image, mask, source, target, window, 1).expect("one band");
+                // More bands than rows are held to the rows.
+                for bands in [2, 3, 8, 1000] {
+                    let cut = area_window_rgba_in_bands(image, mask, source, target, window, bands);
+                    assert_eq!(cut.as_ref(), Some(&one), "{window:?} in {bands} bands");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_shrink_takes_threads_by_the_samples_it_covers() {
+        let whole = Window { x0: 0, y0: 0, x1: 1024, y1: 700 };
+        assert_eq!(shrink_bands((1024, 700), (1024, 700), whole), 1, "under one band's samples");
+        let bands = shrink_bands((12600, 9000), (1024, 700), whole);
+        assert!(bands >= 1 && bands <= MAX_SHRINK_BANDS, "{bands}");
+        let corner = Window { x0: 0, y0: 0, x1: 10, y1: 10 };
+        assert_eq!(shrink_bands((12600, 9000), (1024, 700), corner), 1, "a corner stays on this thread");
+        let one_row = Window { x0: 0, y0: 0, x1: 1024, y1: 1 };
+        assert_eq!(shrink_bands((60000, 60000), (1024, 700), one_row), 1, "no more bands than rows");
+        // Nothing overflows or divides by zero on the largest sizes, or an empty target.
+        assert!(shrink_bands((u32::MAX, u32::MAX), (1, 1), Window { x0: 0, y0: 0, x1: 1, y1: 1 }) >= 1);
+        assert!(shrink_bands((10, 10), (0, 0), Window { x0: 0, y0: 0, x1: 0, y1: 0 }) >= 1);
+        assert!(SHRINK_SAMPLES_PER_BAND > 0);
     }
 
     /// Atlas fork: a window outside the target, or empty, is refused rather than read past.
