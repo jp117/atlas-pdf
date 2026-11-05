@@ -67,8 +67,10 @@ impl Cache {
 /// PdfCraft patch: a byte-budgeted cache of decoded images, keyed by everything a decode reads
 /// ([`DecodedImageKey`]). Image-heavy pages decode thousands of images; without this every tile
 /// and every scale decodes them all again. Entries are shared (`Arc`), so a hit lends the pixels
-/// without copying them; when an insert would pass the budget the whole map is dropped (a fresh
-/// epoch), which only costs re-decoding, and an image larger than the whole budget is never kept.
+/// without copying them; when an insert would pass the budget the images used longest ago go
+/// first (Atlas fork: it dropped the whole map, so a page whose images together passed the budget
+/// decoded all of them again on every render), which only costs re-decoding, and an image larger
+/// than the whole budget is never kept.
 /// The budget caps memory per cache, which several interpreter caches may share
 /// ([`SharedImageCache`]). While one thread decodes an image, the others that ask for it wait
 /// for that decode (at most [`PENDING_WAIT`]) instead of repeating it alongside, which for a large
@@ -114,10 +116,19 @@ pub(crate) struct DecodedImageKey {
 
 type DecodedEntry = Option<Arc<dyn Any + Send + Sync>>;
 
+/// Atlas fork: a cached image, what it holds and when it was last asked for.
+struct KeptImage {
+    entry: DecodedEntry,
+    size: usize,
+    used: u64,
+}
+
 struct DecodedImageCacheInner {
-    map: HashMap<DecodedImageKey, DecodedEntry>,
+    map: HashMap<DecodedImageKey, KeptImage>,
     bytes: usize,
     budget: usize,
+    /// Atlas fork: counts the asks, to tell which image was used longest ago.
+    clock: u64,
     /// Images some thread is decoding now.
     pending: HashSet<DecodedImageKey>,
     /// Images decoded too large for the budget: every thread decodes these on its own, rather
@@ -153,6 +164,7 @@ impl DecodedImageCache {
                     map: HashMap::new(),
                     bytes: 0,
                     budget,
+                    clock: 0,
                     pending: HashSet::new(),
                     oversized: HashSet::new(),
                     decodes: 0,
@@ -186,9 +198,12 @@ impl DecodedImageCache {
         };
         let mut waited = Duration::ZERO;
         loop {
+            inner.clock = inner.clock.saturating_add(1);
+            let clock = inner.clock;
             // A hit (or a failed decode, recorded as `None`) shares what is there.
-            if let Some(entry) = inner.map.get(&key) {
-                return entry.clone().and_then(|e| e.downcast::<T>().ok());
+            if let Some(kept) = inner.map.get_mut(&key) {
+                kept.used = clock;
+                return kept.entry.clone().and_then(|e| e.downcast::<T>().ok());
             }
             // Wait while another thread decodes this image. A single-threaded build (the web)
             // has no other thread, and its condition variable can't wait.
@@ -221,7 +236,7 @@ impl DecodedImageCache {
         };
         // Another thread may have decoded it meanwhile: keep the first copy.
         if let Some(existing) = inner.map.get(&key)
-            && let Some(existing) = existing.clone().and_then(|e| e.downcast::<T>().ok())
+            && let Some(existing) = existing.entry.clone().and_then(|e| e.downcast::<T>().ok())
         {
             return Some(existing);
         }
@@ -229,20 +244,38 @@ impl DecodedImageCache {
         if size > inner.budget {
             inner.oversized.insert(key);
         } else {
-            if inner.bytes.saturating_add(size) > inner.budget {
-                inner.map.clear();
-                inner.oversized.clear();
-                inner.bytes = 0;
-            }
+            inner.make_room(size);
             inner.bytes = inner.bytes.saturating_add(size);
-            inner
-                .map
-                .insert(key, val.clone().map(|v| v as Arc<dyn Any + Send + Sync>));
+            let used = inner.clock;
+            let entry = val.clone().map(|v| v as Arc<dyn Any + Send + Sync>);
+            inner.map.insert(key, KeptImage { entry, size, used });
         }
         // Release the lock before the claim, which takes it again to let the waiters go.
         drop(inner);
         drop(claim);
         val
+    }
+}
+
+impl DecodedImageCacheInner {
+    /// Atlas fork: lets go of the images used longest ago until `size` more bytes fit the budget.
+    /// A thread still drawing one keeps it alive until it is done. A failed decode holds nothing,
+    /// so it stays: it would only fail again.
+    fn make_room(&mut self, size: usize) {
+        while self.bytes.saturating_add(size) > self.budget {
+            let oldest = self
+                .map
+                .iter()
+                .filter(|(_, kept)| kept.size > 0)
+                .min_by_key(|(_, kept)| kept.used)
+                .map(|(key, _)| *key);
+            let Some(kept) = oldest.and_then(|key| self.map.remove(&key)) else {
+                // Nothing left that holds anything: `bytes` must already be 0.
+                self.bytes = 0;
+                return;
+            };
+            self.bytes = self.bytes.saturating_sub(kept.size);
+        }
     }
 }
 

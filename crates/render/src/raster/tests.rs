@@ -8307,6 +8307,97 @@ fn a_renderers_renders_share_their_decoded_images() {
     assert_eq!(r.images.decodes(), 1, "three renders of the page decode its scan once");
 }
 
+/// Atlas fork: pages that draw the named images of `images` (each `side` × `side`, grey), one
+/// page per list of names.
+fn pages_of_images_pdf(side: usize, images: &[&str], pages: &[&[&str]]) -> Vec<u8> {
+    let page_object = |p: usize| 3 + p * 2;
+    let image_object = |n: usize| 3 + pages.len() * 2 + n;
+    let kids: Vec<String> = (0..pages.len()).map(|p| format!("{} 0 R", page_object(p))).collect();
+    let mut pdf = format!(
+        "%PDF-1.7\n1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n2 0 obj << /Type /Pages /Kids [{}] /Count {} >> endobj\n",
+        kids.join(" "),
+        pages.len()
+    );
+    let xobjects: Vec<String> = images.iter().enumerate().map(|(n, name)| format!("/{name} {} 0 R", image_object(n))).collect();
+    for (p, names) in pages.iter().enumerate() {
+        let content: String = names.iter().map(|n| format!("q 100 0 0 100 0 0 cm /{n} Do Q\n")).collect();
+        pdf.push_str(&format!(
+            "{0} 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 100 100] /Contents {1} 0 R /Resources << /XObject << {2} >> >> >> endobj\n\
+             {1} 0 obj << /Length {3} >> stream\n{content}endstream endobj\n",
+            page_object(p),
+            page_object(p) + 1,
+            xobjects.join(" "),
+            content.len()
+        ));
+    }
+    let mut pdf = pdf.into_bytes();
+    for n in 0..images.len() {
+        pdf.extend(
+            format!(
+                "{} 0 obj << /Type /XObject /Subtype /Image /Width {side} /Height {side} /ColorSpace /DeviceGray /BitsPerComponent 8 /Length {} >> stream\n",
+                image_object(n),
+                side * side
+            )
+            .bytes(),
+        );
+        pdf.extend(std::iter::repeat_n(n as u8 * 40, side * side));
+        pdf.extend_from_slice(b"\nendstream endobj\n");
+    }
+    pdf.extend_from_slice(b"trailer << /Root 1 0 R >>\n%%EOF\n");
+    pdf
+}
+
+/// Renders `pages` in turn and returns how many images the renderer decoded in all.
+fn decodes_rendering(r: &mut PageRenderer, pages: &[usize]) -> usize {
+    for &page in pages {
+        let out = r.render(RenderRequest { page, scale: 1.0, ..Default::default() });
+        assert!(out.error.is_none(), "{:?}", out.error);
+    }
+    r.images.decodes()
+}
+
+/// Atlas fork: going over the budget lets go of the image used longest ago, not of all of them. A
+/// page of masked strips that together passed the budget decoded every strip on every render.
+#[test]
+fn going_over_the_image_budget_keeps_the_images_still_in_use() {
+    let side = 200;
+    let pdf = pages_of_images_pdf(side, &["A", "B", "C", "D"], &[&["A", "B", "C"], &["D"], &["B", "C"]]);
+    let mut r = PageRenderer::new(Arc::new(pdf), RenderConfig::default());
+    // Room for three of them and a little over.
+    r.images = SharedImageCache::new(side * side * 3 + side);
+    assert_eq!(decodes_rendering(&mut r, &[0]), 3);
+    assert_eq!(decodes_rendering(&mut r, &[1]), 4, "D needs room, and A was used longest ago");
+    assert_eq!(decodes_rendering(&mut r, &[2]), 4, "B and C stayed");
+    assert_eq!(decodes_rendering(&mut r, &[0]), 5, "A decodes again");
+}
+
+/// Atlas fork: drawing an image counts as using it, so it isn't the next to go.
+#[test]
+fn an_image_drawn_again_is_kept_over_an_older_one() {
+    let side = 200;
+    let pdf = pages_of_images_pdf(side, &["A", "B", "C"], &[&["A"], &["B"], &["C"]]);
+    let mut r = PageRenderer::new(Arc::new(pdf), RenderConfig::default());
+    r.images = SharedImageCache::new(side * side * 2 + side);
+    assert_eq!(decodes_rendering(&mut r, &[0, 1, 0]), 2, "A is used again, after B");
+    assert_eq!(decodes_rendering(&mut r, &[2]), 3, "C takes B's place");
+    assert_eq!(decodes_rendering(&mut r, &[0]), 3, "A stayed");
+    assert_eq!(decodes_rendering(&mut r, &[1]), 4, "B went");
+}
+
+/// Atlas fork: an image over the whole budget still draws, and leaves the others where they are.
+#[test]
+fn an_image_over_the_whole_budget_draws_and_evicts_nothing() {
+    let pdf = pages_of_images_pdf(200, &["A", "Z"], &[&["A"], &["Z"]]);
+    let mut r = PageRenderer::new(Arc::new(pdf), RenderConfig::default());
+    r.images = SharedImageCache::new(200 * 200 - 1);
+    let out = r.render(RenderRequest { page: 1, scale: 1.0, ..Default::default() });
+    assert!(out.error.is_none(), "{:?}", out.error);
+    // Image Z's grey level, not a skipped image's white page.
+    assert_eq!(out.rgba[..3], [40, 40, 40], "it is drawn");
+    assert_eq!(decodes_rendering(&mut r, &[1]), 2, "it decodes each time");
+}
+
+
 /// A page under a large scan decodes it once for all its tiles, zooms and previews (vendored
 /// hayro-interpret patch: decoded images are kept by a renderer across its renders, keyed
 /// without the decode target, which only JPEG 2000 reads, and without preview). The target,
