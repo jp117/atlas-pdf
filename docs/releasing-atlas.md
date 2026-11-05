@@ -57,6 +57,9 @@ ignore (they follow the latest full release).
 
 **Building on your own machine:** `pwsh packaging/windows/package-atlas.ps1` writes the same files
 to `dist\atlas`. It needs the .NET 8 SDK and `dotnet tool install -g vpk --version 1.2.161`.
+Set `CRAFT_FONTS_DIR` and `CRAFT_I18N_DIR` to checkouts of craft-fonts and of craft-i18n (at the commit
+in `craft-i18n.rev`) first, as the workflow does: without them the build has no Japanese fonts and is
+English only.
 
 **Trying an update locally:** serve a folder holding a newer build's `releases.win.json` and
 `.nupkg` (`python -m http.server 8000`), then start an installed copy with

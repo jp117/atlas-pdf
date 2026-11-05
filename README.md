@@ -160,12 +160,16 @@ Upstream files carry one- to three-line hooks, each marked `Atlas fork`:
   and SHX filtering;
 - `render/src/{lib,text/device,inspect/annotations}.rs` and `render/src/raster{,/pool}.rs` (the
   shared image cache);
-- `annot/src/appearance{,/symbols}.rs`: the see-through fill of takeoff boxes;
-- `ui-egui/src/{lib,state,app,canvas,canvas/bars,chrome,menus,editing,dialogs}.rs`,
-  `ui-egui/src/app/{control,keys}.rs`, `ui-egui/src/control/host.rs` and
+- `ui-egui/src/{lib,state,app,canvas,hotbar,chrome,menus,editing}.rs`,
+  `ui-egui/src/app/{control,keys}.rs`, `ui-egui/src/canvas/{page_input,page_cursor}.rs`,
+  `ui-egui/src/control/host.rs`, `ui-egui/src/dialogs/preferences.rs` and
   `ui-egui/src/panels/right.rs`;
 - `automation/src/{lib,dispatch,tools}.rs`;
 - `xtask/src/layers.rs`.
+
+The takeoff tool is a page module (`atlas/takeoff_tool.rs`), so upstream's page rules bind it: it
+reads `PagePointer`, claims the cursor and acts on a press only when it is nobody's. Tests in
+`canvas/page_pointer/tests.rs` enforce them.
 
 The Atlas menu is part of upstream's menu bar (`ui-egui/src/menus.rs`, from craft-menu), so on
 macOS it is in the native menu bar too.
@@ -203,6 +207,11 @@ that skips them only gets harder to merge. Resolve each conflict by re-applying 
   `pdfcraft_atlas::brand` (upstream code added since the last merge may hard-code "PdfCraft").
 - **Atlas's image decoding and sampling patches** in `vendor/hayro*` (vendor/README.md lists them),
   renumbered after upstream's own when both add patches.
+- **Image drawing that works per tile.** Upstream's `draw_image` shrinks whole images. Ours works out
+  what a tile shows (`visible_window`, `sample_window`, `area_window_rgba`), decodes very large
+  JPEGs at the size they are drawn (`reduced_jpeg_divisor`), and keeps decoded images with a
+  least-recently-used budget. A merge that loses this makes big drawing sets slow again:
+  time one (`crates/render/examples/page_timing.rs`) before and after.
 - **Every `Atlas fork` hook**: compare `git grep -c "Atlas fork"` on `main` and on the merge.
 - **Tabs in several windows** come from storytold/pdfcraft#3483, which upstream hadn't merged
   when Atlas took it (2026-10-29). Once upstream merges it, the merge brings nothing new. If
