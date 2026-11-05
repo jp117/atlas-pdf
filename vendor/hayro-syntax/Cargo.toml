@@ -48,6 +48,7 @@ std = [
     "dep:rustc-hash",
     "dep:stringprep",
     "zune-jpeg?/std",
+    "dep:jpeg-decoder",
 ]
 unsafe = [
     "std",
@@ -109,6 +110,12 @@ optional = true
 
 [dependencies.zune-jpeg]
 version = "0.5"
+optional = true
+default-features = false
+
+# Atlas fork: decodes very large JPEGs at a reduced size (filter/dct.rs).
+[dependencies.jpeg-decoder]
+version = "0.3"
 optional = true
 default-features = false
 

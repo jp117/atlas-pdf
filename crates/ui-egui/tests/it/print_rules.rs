@@ -502,6 +502,9 @@ fn preferences_edit_the_rules_the_print_dialog_follows() {
     assert_eq!(h.get_by_label("Printer of rule 1").value().as_deref(), Some(CANON_C), "the starter rules");
 
     // Send ARCH C to the other printer, and that is what is saved and followed.
+    // The section is further down the Preferences dialog's scrolling page.
+    h.get_by_label("Printer of rule 1").scroll_to_me();
+    h.run_steps(3);
     h.get_by_label("Printer of rule 1").click();
     h.run_steps(3);
     h.get_all_by_label(CANON_D).last().unwrap().click();
@@ -521,6 +524,8 @@ fn rules_can_be_added_removed_and_restored() {
     let file = temp_rules_file("rows");
     let mut h = harness_with_rules_file(file.clone(), &[ARCH_C]);
     open_preferences(&mut h);
+    h.get_all_by_label("Remove").next().unwrap().scroll_to_me();
+    h.run_steps(3);
     h.get_all_by_label("Remove").next().unwrap().click();
     h.run_steps(4);
     assert_eq!(PrinterRules::load(&file).rules.printer_for(paper("ARCH C")), None, "the first rule is gone");

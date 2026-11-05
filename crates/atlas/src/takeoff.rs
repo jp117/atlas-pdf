@@ -117,7 +117,7 @@ fn invalid(s: &str) -> TakeoffError {
 /// The style every mark of a status is drawn with: a solid border filled with the same colour.
 /// The fill is see-through only once [`write_fields`] adds `/ca`.
 pub fn style(status: Status) -> Style {
-    Style { color: status.color(), opacity: 1.0, width: BORDER_WIDTH, fill: Some(status.color()) }
+    Style { color: status.color(), opacity: 1.0, width: BORDER_WIDTH, fill: Some(status.color()), ..Style::default() }
 }
 
 /// A mark to add.

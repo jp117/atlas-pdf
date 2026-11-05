@@ -32,6 +32,8 @@ jobs:
     env:
       CRAFT_FONTS_DIR: ${{ github.workspace }}\craft-fonts
       CRAFT_FONTS_REQUIRED: "1"
+      CRAFT_I18N_DIR: ${{ github.workspace }}\craft-i18n
+      CRAFT_I18N_REQUIRED: "1"
       VPK_VERSION: "1.2.161"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -41,6 +43,14 @@ jobs:
           repository: storytold/craft-fonts
           ref: b076417b5880bd4154bd22f00695b1d28c6bea83
           path: craft-fonts
+      # The translations, at the commit in craft-i18n.rev; without them the build is English only.
+      - name: Translations
+        shell: pwsh
+        run: |
+          $rev = (Get-Content craft-i18n.rev -TotalCount 1).Trim()
+          git init craft-i18n
+          git -C craft-i18n fetch --depth 1 https://github.com/storytold/craft-i18n $rev
+          git -C craft-i18n checkout FETCH_HEAD
       - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: Version
