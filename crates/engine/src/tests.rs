@@ -8374,6 +8374,37 @@ fn takeoff_marks_are_undoable_comment_edits() {
     assert_eq!(check_permission(&Edit::AddTakeoffMark(mark), &p), Err(EditError::NotPermitted("comments")));
 }
 
+/// Atlas fork: a takeoff box is a tint, not a patch of paint. Drawn over a sheet, the equipment
+/// under it still shows, both as edited and after a save and reopen. This guards the `/ca` fill
+/// opacity through upstream merges, which rework annotation appearances and the renderer.
+#[test]
+fn takeoff_boxes_are_see_through_when_drawn_and_after_a_save() {
+    use pdfcraft_atlas::takeoff::{NewMark, Status};
+    // The left half of the 80 x 40 pt page is red, the right half white. The box spans both.
+    let mut session = Session::default();
+    let id = session.open("E-601.pdf", None, Arc::new(half_red_page()), None).unwrap();
+    let mark = NewMark {
+        page: 0,
+        rect: [10.0, 5.0, 70.0, 35.0],
+        status: Status::Included,
+        label: "LP-2".into(),
+        comment: String::new(),
+        author: "Estimator".into(),
+    };
+    session.apply(id, Edit::AddTakeoffMark(mark)).unwrap();
+    let saved = session.save_bytes(id).unwrap();
+    let reopened = session.open("E-601 saved.pdf", None, saved, None).unwrap();
+
+    for (doc, when) in [(id, "as edited"), (reopened, "after a save")] {
+        // At scale 2 the page is 160 x 80 pixels; both samples sit well inside the border.
+        let rendered = render_page(&session, doc);
+        let [r, g, b, _] = stamp_pixel(&rendered, 40, 40);
+        assert!(r > 150 && g < 100 && b < 100, "the red under the box shows through {when}: {r} {g} {b}");
+        let [r, g, b, _] = stamp_pixel(&rendered, 120, 40);
+        assert!(r > 150 && r < 245 && g > r, "white under the box is tinted green, not painted {when}: {r} {g} {b}");
+    }
+}
+
 /// Copy Image reads a JBIG2 image's `/JBIG2Globals`: here they hold the page information, and the
 /// image's own stream only an extension segment decoders skip, so it has a picture only through
 /// them. Its default pixel is black.
