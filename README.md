@@ -212,7 +212,9 @@ that skips them only gets harder to merge. Resolve each conflict by re-applying 
   JPEGs at the size they are drawn (`reduced_jpeg_divisor`), and keeps decoded images with a
   least-recently-used budget. A merge that loses this makes big drawing sets slow again:
   time one (`crates/render/examples/page_timing.rs`) before and after.
-- **Every `Atlas fork` hook**: compare `git grep -c "Atlas fork"` on `main` and on the merge.
+- **Every `Atlas fork` hook.** `crates/atlas/tests/fork_hooks.rs` counts the marked lines in every
+  file and fails when a merge drops one. When a hook moves (upstream split the file), update its
+  `HOOKS` table in the merge; never lower a count without finding where the hook went.
 - **Tabs in several windows** come from storytold/pdfcraft#3483, which upstream hadn't merged
   when Atlas took it (2026-10-29). Once upstream merges it, the merge brings nothing new. If
   upstream merges a different design instead, take upstream's and drop #3483's code
@@ -220,7 +222,10 @@ that skips them only gets harder to merge. Resolve each conflict by re-applying 
 
 To take one particular fix whose commit applies cleanly, use `git cherry-pick <commit>`. After
 taking anything from upstream, run the quality gates on the crates it touched and
-`cargo test -p pdfcraft-ui-egui -p pdfcraft-render -p pdfcraft-atlas` before pushing.
+`cargo test -p pdfcraft-ui-egui -p pdfcraft-render -p pdfcraft-atlas -p pdfcraft-engine` before
+pushing. The engine's `takeoff_boxes_are_see_through_when_drawn_and_after_a_save` renders a
+takeoff box over a sheet, so it fails if a merge loses the `/ca` fill opacity anywhere between
+the annotation and the renderer.
 
 ## Next
 
