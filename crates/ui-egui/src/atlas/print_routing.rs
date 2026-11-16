@@ -193,7 +193,7 @@ impl PrintRouting {
     }
 
     /// The layout to start the next print from, likewise.
-    fn layout_to_remember(&self) -> Option<(Handling, SizeMode)> {
+    pub(crate) fn layout_to_remember(&self) -> Option<(Handling, SizeMode)> {
         if self.active && !self.layout_changed { self.layout_before } else { None }
     }
 }

@@ -107,6 +107,10 @@ fn every_registered_command_is_implemented() {
             app.apply_window_ops(&egui::Context::default());
             assert_eq!(app.window_count(), 2);
         }
+        if spec.id == "prepress.marks.remove" {
+            use pdfcraft_engine::{Edit, PrinterMarks};
+            app.apply_edit(Edit::AddPrinterMarks { pages: vec![0], settings: PrinterMarks::default(), replace: false });
+        }
         // Copying comments needs a selected comment; pasting needs copied ones.
         if matches!(spec.id, "comment.copy" | "comment.paste") {
             let shape = pdfcraft_engine::Shape::Rectangle { rect: [10.0, 10.0, 50.0, 50.0] };

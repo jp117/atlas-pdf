@@ -6,7 +6,7 @@ use pdfcraft_atlas::print_rules::{self, Conflict, Plan, PrinterRules, Route, Sel
 use pdfcraft_engine::print::{self, Layout, PAPERS, spool};
 use serde_json::{Value, json};
 
-use crate::printing::{JobOptions, bad, paper_named, spool_job};
+use crate::printing::{JobOptions, bad, paper_named, spool_job, submit};
 use crate::tools::ToolDef;
 use crate::{Args, Automation, Result, failed, write_atomic};
 
@@ -260,7 +260,7 @@ impl Automation {
         for job in jobs {
             let (_, paper) = PAPERS.get(job.paper).copied().ok_or_else(|| bad("unknown paper"))?;
             let settings = job.options.settings(job.pages.clone(), paper);
-            let sheets = print::layout(&sizes, &settings).map_err(|e| bad(e.to_string()))?.len();
+            let sheets = print::layout(&sizes, &settings).map_err(|e| bad(e.to_string()))?;
             let bytes = self.session.print_pdf(id, &settings).map_err(failed)?;
             ready.push((job, sheets, bytes));
         }
@@ -274,15 +274,16 @@ impl Automation {
                 "layout": layout_name(&job.options.layout),
                 "page_numbers": page_numbers(&job.pages),
                 "pages": job.pages.len(),
-                "sheets": sheets,
+                "sheets": sheets.len(),
                 "bytes": bytes.len(),
             });
             match (&job.printer, path) {
                 (Some(printer), _) => {
-                    let spooled = spool_job(a, printer, job.title.clone(), job.options.duplex, job.paper)
-                        .and_then(|spec| spool::submit(&bytes, &spec).map_err(|e| failed(e.to_string())));
+                    let media = print::cups_media(job.paper);
+                    let spooled = spool_job(a, printer, job.title.clone(), job.options.duplex, media, job.options.raster, &sheets)
+                        .and_then(|spec| submit(bytes, spec));
                     match spooled {
-                        Ok(receipt) => report["job"] = json!(receipt),
+                        Ok(receipt) => report["job"] = receipt,
                         Err(e) if sent == 0 => return Err(e),
                         // Don't let the caller resend jobs that went out.
                         Err(e) => return Err(failed(format!("{sent} of {total} jobs were sent before this one failed: {e}"))),

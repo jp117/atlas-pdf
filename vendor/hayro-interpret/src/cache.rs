@@ -1,18 +1,20 @@
 use crate::util::hash128;
+use crate::{InterpreterWarning, WarningSinkFn};
 use hayro_syntax::object::{Array, Dict, MaybeRef, Name, Null, ObjRef, Object, Stream};
 use kurbo::Affine;
 use std::any::Any;
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 type CacheMap = HashMap<u128, Option<Box<dyn Any + Send + Sync>>>;
 /// The objects read from a document, by key. PdfCraft patch (48): the second field counts the
-/// ICC profiles read through it ([`Cache::icc_profile_reads`]).
+/// ICC profiles read through it ([`Cache::icc_profile_reads`]). PdfCraft patch (80): the third
+/// counts the `/Indexed` lookup tables read ([`Cache::indexed_lookup_reads`]).
 #[derive(Clone)]
-pub(crate) struct Cache(Arc<Mutex<CacheMap>>, Arc<AtomicUsize>);
+pub(crate) struct Cache(Arc<Mutex<CacheMap>>, Arc<AtomicUsize>, Arc<AtomicUsize>);
 impl Default for Cache {
     fn default() -> Self {
         Self::new()
@@ -21,7 +23,11 @@ impl Default for Cache {
 
 impl Cache {
     pub(crate) fn new() -> Self {
-        Self(Arc::new(Mutex::new(HashMap::new())), Arc::default())
+        Self(
+            Arc::new(Mutex::new(HashMap::new())),
+            Arc::default(),
+            Arc::default(),
+        )
     }
 
     /// PdfCraft patch (48): count one ICC profile read, the colour space of an `/ICCBased`
@@ -33,6 +39,17 @@ impl Cache {
     /// PdfCraft patch (48): how many ICC profiles were read through this cache.
     pub(crate) fn icc_profile_reads(&self) -> usize {
         self.1.load(Ordering::Relaxed)
+    }
+
+    /// PdfCraft patch (80): count one `/Indexed` lookup table read (a stream decoded or a
+    /// string copied).
+    pub(crate) fn count_indexed_lookup_read(&self) {
+        self.2.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// PdfCraft patch (80): how many `/Indexed` lookup tables were read through this cache.
+    pub(crate) fn indexed_lookup_reads(&self) -> usize {
+        self.2.load(Ordering::Relaxed)
     }
 
     pub(crate) fn get_or_insert_with<T: Clone + Send + Sync + 'static>(
@@ -75,6 +92,17 @@ impl Cache {
 /// ([`SharedImageCache`]). While one thread decodes an image, the others that ask for it wait
 /// for that decode (at most [`PENDING_WAIT`]) instead of repeating it alongside, which for a large
 /// scan multiplied its memory by the render threads. A poisoned lock decodes without the cache.
+///
+/// PdfCraft patch (91): a decode that fails is kept too, as the warnings it reported, so an
+/// image drawn again and again that doesn't decode (damaged data, a JPX or JBIG2 stream its
+/// decoder refuses) isn't decoded again at every draw: a later draw reports the same warnings
+/// and gets nothing, as the decode did. A failure counts [`FAILED_DECODE_BYTES`] towards the
+/// budget, so failures can't grow the map without bound either. A failure that may come from
+/// what the page had left (its JBIG2 allowance, `ContentTruncated`) isn't kept: another page,
+/// or the same page drawn again, starts with a fresh allowance. One that left out a JBIG2 mask
+/// for a limit its stream reaches by itself is kept, with the image it takes along (patch 73,
+/// [`note_stream_limited`]): decoding them again would only refuse them again, and an image of
+/// any size under such a mask was decoded again at every draw.
 #[derive(Clone)]
 pub(crate) struct DecodedImageCache {
     inner: Arc<(Mutex<DecodedImageCacheInner>, Condvar)>,
@@ -112,9 +140,68 @@ pub(crate) struct DecodedImageKey {
     pub(crate) interpolate: bool,
     pub(crate) default_space: Option<u128>,
     pub(crate) target: Option<(u32, u32)>,
+    /// PdfCraft patch (82): the size a soft mask far larger than where it is drawn was averaged
+    /// down to (`ImageXObject::decoded_soft_mask`), `None` for a mask kept at its own size.
+    pub(crate) shrunk_to: Option<(u32, u32)>,
 }
 
-type DecodedEntry = Option<Arc<dyn Any + Send + Sync>>;
+/// PdfCraft patch (91): what the budget charges for a failed decode, about what its key and
+/// entry take in the map.
+const FAILED_DECODE_BYTES: usize = 128;
+
+/// PdfCraft patch (91): with the warnings of a failure kept, that it left out a JBIG2 mask for a
+/// limit its stream reaches by itself ([`note_stream_limited`]); no warning's flag.
+const STREAM_LIMITED: u8 = 128;
+
+std::thread_local! {
+    static LEFT_OUT_BY_STREAM_LIMIT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// PdfCraft patch (73): note, wherever a decode reports `ContentTruncated` for an image or a kept
+/// failure replays it, whether that left out a JBIG2 mask for a limit its stream reaches by itself
+/// (`hayro_syntax::jbig2_limited_by_stream`): its failure, and the failure of the image it takes
+/// along, is then the stream's to keep, since decoding it again refuses it again.
+pub(crate) fn note_stream_limited(limited: bool) {
+    LEFT_OUT_BY_STREAM_LIMIT.with(|left_out| left_out.set(limited));
+}
+
+fn stream_limited() -> bool {
+    LEFT_OUT_BY_STREAM_LIMIT.with(std::cell::Cell::get)
+}
+
+/// PdfCraft patch (91): what a [`DecodedImageCache`] keeps for a key.
+enum DecodedEntry {
+    /// The decoded image, shared with the threads drawing it.
+    Decoded(Arc<dyn Any + Send + Sync>),
+    /// The decode failed, reporting these warnings ([`warning_bit`] flags).
+    Failed(u8),
+}
+
+/// PdfCraft patch (91): `warning` as a flag in a set of warnings.
+fn warning_bit(warning: InterpreterWarning) -> u8 {
+    match warning {
+        InterpreterWarning::UnsupportedFont => 1,
+        InterpreterWarning::ImageDecodeFailure => 2,
+        InterpreterWarning::ContentTruncated => 4,
+        InterpreterWarning::ColorFallback => 8,
+        InterpreterWarning::Type3WidthsMissing => 16,
+        InterpreterWarning::MalformedIndexedImage => 32,
+    }
+}
+
+/// PdfCraft patch (91): the warnings in a set of [`warning_bit`] flags.
+fn warnings_in(bits: u8) -> impl Iterator<Item = InterpreterWarning> {
+    [
+        InterpreterWarning::UnsupportedFont,
+        InterpreterWarning::ImageDecodeFailure,
+        InterpreterWarning::ContentTruncated,
+        InterpreterWarning::ColorFallback,
+        InterpreterWarning::Type3WidthsMissing,
+        InterpreterWarning::MalformedIndexedImage,
+    ]
+    .into_iter()
+    .filter(move |warning| bits & warning_bit(*warning) != 0)
+}
 
 /// Atlas fork: a cached image, what it holds and when it was last asked for.
 struct KeptImage {
@@ -136,6 +223,8 @@ struct DecodedImageCacheInner {
     oversized: HashSet<DecodedImageKey>,
     /// How many decodes ran through the cache (misses), for tests.
     decodes: usize,
+    /// PdfCraft patch (82): how many of `decodes` were of masks (keys with `mask_output`).
+    mask_decodes: usize,
 }
 
 /// PdfCraft patch: the decoded-image budget of an interpreter cache of its own.
@@ -168,6 +257,7 @@ impl DecodedImageCache {
                     pending: HashSet::new(),
                     oversized: HashSet::new(),
                     decodes: 0,
+                    mask_decodes: 0,
                 }),
                 Condvar::new(),
             )),
@@ -180,30 +270,53 @@ impl DecodedImageCache {
         self.inner.0.lock().map_or(0, |inner| inner.decodes)
     }
 
+    /// PdfCraft patch (82): how many of [`Self::decodes`] were of soft masks and `/Mask` images,
+    /// for tests. 0 when the lock is poisoned.
+    pub(crate) fn mask_decodes(&self) -> usize {
+        self.inner.0.lock().map_or(0, |inner| inner.mask_decodes)
+    }
+
     /// The decoded image for `key`, from the cache or from `f`, whose result holds `size_of`
-    /// bytes. `None` as the key decodes without the cache.
+    /// bytes; `f` decodes reporting its warnings to the sink it is handed. `None` as the key
+    /// decodes without the cache. PdfCraft patch (91): `sink` gets the warnings of the decode,
+    /// or those of the failed decode kept for `key`.
     pub(crate) fn get_or_insert_with<T: Send + Sync + 'static>(
         &self,
         key: Option<DecodedImageKey>,
         size_of: impl FnOnce(&T) -> usize,
-        f: impl FnOnce() -> Option<T>,
+        sink: &WarningSinkFn,
+        f: impl FnOnce(&WarningSinkFn) -> Option<T>,
     ) -> Option<Arc<T>> {
         let Some(key) = key else {
-            return f().map(Arc::new);
+            return f(sink).map(Arc::new);
         };
         let (lock, decoded) = &*self.inner;
         // A thread panicked while holding the lock: decode without the cache.
         let Ok(mut inner) = lock.lock() else {
-            return f().map(Arc::new);
+            return f(sink).map(Arc::new);
         };
         let mut waited = Duration::ZERO;
         loop {
             inner.clock = inner.clock.saturating_add(1);
             let clock = inner.clock;
-            // A hit (or a failed decode, recorded as `None`) shares what is there.
+            // A hit shares what is there; a kept failure (PdfCraft patch 91) reports its
+            // warnings again without decoding.
             if let Some(kept) = inner.map.get_mut(&key) {
                 kept.used = clock;
-                return kept.entry.clone().and_then(|e| e.downcast::<T>().ok());
+                let hit = match &kept.entry {
+                    DecodedEntry::Decoded(val) => Ok(val.clone()),
+                    DecodedEntry::Failed(bits) => Err(*bits),
+                };
+                // The warnings go out without the lock: a sink may draw or log.
+                drop(inner);
+                return match hit {
+                    Ok(val) => val.downcast::<T>().ok(),
+                    Err(bits) => {
+                        note_stream_limited(bits & STREAM_LIMITED != 0);
+                        warnings_in(bits).for_each(|warning| sink(warning));
+                        None
+                    }
+                };
             }
             // Wait while another thread decodes this image. A single-threaded build (the web)
             // has no other thread, and its condition variable can't wait.
@@ -216,7 +329,7 @@ impl DecodedImageCache {
             }
             inner = match decoded.wait_timeout(inner, PENDING_POLL) {
                 Ok((inner, _)) => inner,
-                Err(_) => return f().map(Arc::new),
+                Err(_) => return f(sink).map(Arc::new),
             };
             waited = waited.saturating_add(PENDING_POLL);
         }
@@ -229,26 +342,63 @@ impl DecodedImageCache {
                 key,
             });
         inner.decodes = inner.decodes.saturating_add(1);
+        if key.mask_output {
+            inner.mask_decodes = inner.mask_decodes.saturating_add(1);
+        }
         drop(inner);
-        let val = f().map(Arc::new);
+        // Decode without holding the lock (decoding must never deadlock the cache), noting the
+        // warnings it reports (PdfCraft patch 91).
+        let reported = Arc::new(AtomicU8::new(0));
+        let recording: WarningSinkFn = {
+            let (reported, sink) = (reported.clone(), sink.clone());
+            Arc::new(move |warning| {
+                reported.fetch_or(warning_bit(warning), Ordering::Relaxed);
+                sink(warning);
+            })
+        };
+        let val = f(&recording).map(Arc::new);
+        let reported = reported.load(Ordering::Relaxed);
         let Ok(mut inner) = lock.lock() else {
             return val;
         };
         // Another thread may have decoded it meanwhile: keep the first copy.
-        if let Some(existing) = inner.map.get(&key)
-            && let Some(existing) = existing.entry.clone().and_then(|e| e.downcast::<T>().ok())
-        {
-            return Some(existing);
+        match inner.map.get(&key).map(|kept| &kept.entry) {
+            Some(DecodedEntry::Decoded(existing)) => {
+                if let Ok(existing) = existing.clone().downcast::<T>() {
+                    return Some(existing);
+                }
+            }
+            Some(DecodedEntry::Failed(_)) if val.is_none() => return None,
+            _ => {}
         }
-        let size = val.as_deref().map_or(0, size_of);
-        if size > inner.budget {
-            inner.oversized.insert(key);
-        } else {
-            inner.make_room(size);
-            inner.bytes = inner.bytes.saturating_add(size);
-            let used = inner.clock;
-            let entry = val.clone().map(|v| v as Arc<dyn Any + Send + Sync>);
-            inner.map.insert(key, KeptImage { entry, size, used });
+        let truncated = reported & warning_bit(InterpreterWarning::ContentTruncated) != 0;
+        let size = match val.as_deref() {
+            Some(v) => Some(size_of(v)),
+            // PdfCraft patch (91): a failure the page's JBIG2 allowance may have caused isn't
+            // the image's to keep, nor one a JBIG2 decode's work did, which may be the page's too.
+            None if hayro_syntax::page_jbig2_work_spent() || (truncated && !stream_limited()) => None,
+            None => Some(FAILED_DECODE_BYTES),
+        };
+        match size {
+            Some(size) if size > inner.budget => {
+                inner.oversized.insert(key);
+            }
+            Some(size) => {
+                inner.make_room(size);
+                inner.bytes = inner.bytes.saturating_add(size);
+                let used = inner.clock;
+                let entry = match &val {
+                    Some(val) => DecodedEntry::Decoded(val.clone() as Arc<dyn Any + Send + Sync>),
+                    // Here only when a limit of its stream refused the mask that left it out.
+                    None if truncated => DecodedEntry::Failed(reported | STREAM_LIMITED),
+                    None => DecodedEntry::Failed(reported),
+                };
+                // An entry replaced (a failure another thread kept) gives its bytes back.
+                if let Some(old) = inner.map.insert(key, KeptImage { entry, size, used }) {
+                    inner.bytes = inner.bytes.saturating_sub(old.size);
+                }
+            }
+            None => {}
         }
         // Release the lock before the claim, which takes it again to let the waiters go.
         drop(inner);
@@ -259,18 +409,17 @@ impl DecodedImageCache {
 
 impl DecodedImageCacheInner {
     /// Atlas fork: lets go of the images used longest ago until `size` more bytes fit the budget.
-    /// A thread still drawing one keeps it alive until it is done. A failed decode holds nothing,
-    /// so it stays: it would only fail again.
+    /// A thread still drawing one keeps it alive until it is done. A kept failure counts its
+    /// `FAILED_DECODE_BYTES` and goes the same way.
     fn make_room(&mut self, size: usize) {
         while self.bytes.saturating_add(size) > self.budget {
             let oldest = self
                 .map
                 .iter()
-                .filter(|(_, kept)| kept.size > 0)
                 .min_by_key(|(_, kept)| kept.used)
                 .map(|(key, _)| *key);
             let Some(kept) = oldest.and_then(|key| self.map.remove(&key)) else {
-                // Nothing left that holds anything: `bytes` must already be 0.
+                // Nothing left: `bytes` must already be 0.
                 self.bytes = 0;
                 return;
             };

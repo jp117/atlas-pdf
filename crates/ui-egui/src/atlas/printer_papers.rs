@@ -133,7 +133,8 @@ fn fit_single(d: &mut PrintDraft) {
         }
     }
     let Some(papers) = known(&d.routing.printer_papers, d.printer.as_deref()) else { return };
-    if d.paper == LABEL_PAPER || d.handling == Handling::Label || papers.takes(d.paper) {
+    // A size the driver added to the list, or a custom paper, is not one of PAPERS to check.
+    if d.paper == LABEL_PAPER || d.handling == Handling::Label || d.paper >= PAPERS.len() || papers.takes(d.paper) {
         return;
     }
     let (Some(to), Some(printer)) = (papers.fallback(), d.printer.clone()) else { return };
