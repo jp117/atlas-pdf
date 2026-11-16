@@ -67,11 +67,13 @@ fn digit(status: Status) -> egui::Key {
 /// (the same rule as the V and H tool keys).
 pub(crate) fn keys(app: &mut PdfCraftApp, i: usize, ctx: &egui::Context) {
     let Some(view) = app.views.get(i) else { return };
-    let free = app.dialog.is_none() && !app.palette_open && !ctx.egui_wants_keyboard_input() && view.forms.focus.is_none();
+    // The page keys, as the V and H tool keys read them: none while something is over the pages.
+    let keys = app.page_keys;
+    let free = app.dialog.is_none() && !app.palette_open && !ctx.egui_wants_keyboard_input() && view.forms.focus.is_none() && !keys.over();
     if !free || !ctx.input(|input| input.modifiers.is_none()) {
         return;
     }
-    let Some(status) = Status::ALL.into_iter().find(|s| ctx.input(|input| input.key_pressed(digit(*s)))) else { return };
+    let Some(status) = Status::ALL.into_iter().find(|s| keys.pressed(ctx, digit(*s))) else { return };
     if let Some(edit) = restatus_selected(app, i, status) {
         if let Some(view) = app.views.get_mut(i) {
             view.pending_edit = Some(edit);

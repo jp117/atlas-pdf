@@ -32,6 +32,8 @@ pub fn right_panel(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
     let bm_can_paste = app.bookmark_clipboard.is_some();
     // Prepare a form is open: the Fields panel orders tabs.
     let preparing = app.is_preparing();
+    // The Pages panel's Escape and Delete act on the pages: not while something is over them.
+    let keys = app.page_keys.also(app.covers_pages());
     {
         let Some(doc) = app.session.get(id) else { return };
         let info = &doc.info;
@@ -54,6 +56,7 @@ pub fn right_panel(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
                     RightPanel::Bookmarks => ("Bookmarks", None),
                     RightPanel::Pages => ("Pages", Some(info.pages.len())),
                     RightPanel::Fields => ("Fields", Some(info.fields.len())),
+                    // Atlas fork: the grouped panel lists every layer, not only `/Order`'s.
                     RightPanel::Layers => ("Layers", Some(info.layers.len())),
                     RightPanel::Attachments => ("Attachments", Some(info.attachments.len())),
                     RightPanel::Signatures => ("Signatures", Some(doc.signatures.iter().filter(|s| s.signed).count())),
@@ -223,7 +226,7 @@ pub fn right_panel(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
                             ui.label(tl!("Some bookmarks are not shown here: the panel lists a limited number, nested a limited depth."));
                         }
                     }
-                    RightPanel::Pages => pages(ui, &t, info, view, modal, bm_editable, &mut nav),
+                    RightPanel::Pages => pages(ui, &t, info, view, modal, keys, bm_editable, &mut nav),
                     RightPanel::Fields => {
                         field_properties = fields(
                             ui,
@@ -347,6 +350,20 @@ pub fn right_panel(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
                                     ui.close();
                                 }
                                 if let Some(key) = deletable
+                                    && ui.button(tl!("Edit description")).clicked()
+                                {
+                                    app.attachment_description_draft = Some((
+                                        id,
+                                        doc.edit_generation(),
+                                        key.clone(),
+                                        a.name.clone(),
+                                        a.description.clone().unwrap_or_default(),
+                                        a.has_description,
+                                    ));
+                                    app.dialog = Some(crate::Dialog::AttachmentDescription);
+                                    ui.close();
+                                }
+                                if let Some(key) = deletable
                                     && ui.button(tl!("Delete attachment")).clicked()
                                 {
                                     panel_edit = Some(pdfcraft_engine::Edit::DeleteAttachment { key: key.clone() });
@@ -420,6 +437,11 @@ pub fn right_panel(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
             Some(doc) => app.views[index].go_to_dest(p, dest, &doc.info),
             None => app.views[index].go_to_page(p),
         },
+        Some(Nav::Action(target)) => {
+            if let Some((source, file, destination)) = crate::canvas::follow_link(app, index, Some(target)) {
+                app.open_remote_link(source, file, destination);
+            }
+        }
         Some(Nav::Flash(p, r)) => {
             let v = &mut app.views[index];
             if let Some(doc) = app.session.get(id) {

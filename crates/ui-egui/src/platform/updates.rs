@@ -68,6 +68,19 @@ pub(crate) struct Updates {
     pub(crate) open: bool,
 }
 
+// Atlas fork: PdfCraft's `craft_update` flow is left out, as it installs PdfCraft's releases. These
+// stand in for the two calls the rest of the app makes into it.
+impl Updates {
+    /// Called from `on_exit`. Nothing waits for the exit here: Atlas's updater installs at close
+    /// by itself (`atlas::updates`).
+    pub(crate) fn exiting(&mut self) {}
+
+    /// There is no startup prompt over the window; the Updates dialog (`open`) counts as a dialog.
+    pub(crate) fn prompt_open(&self) -> bool {
+        false
+    }
+}
+
 impl PdfCraftApp {
     /// Help ▸ Check for updates: ask for the latest release and show the outcome.
     pub fn check_for_updates(&mut self) {

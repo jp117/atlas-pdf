@@ -63,8 +63,15 @@ impl PdfCraftApp {
         #[cfg(not(target_arch = "wasm32"))]
         {
             let path = |v: &crate::DocView| self.session.get(v.id).and_then(|d| d.path.as_deref()).map(absolute);
-            // Every window's files, the main window's first (the next start opens them in one window).
-            let files = self.all_views().filter_map(|(_, v)| Some(SessionFile { path: path(v)?, page: v.current })).take(MAX_FILES).collect();
+            // Every window's files, the main window's first (the next start opens them in one
+            // window), each file once (split view can show one document in two tabs).
+            let mut listed = std::collections::HashSet::new();
+            let files = self
+                .all_views()
+                .filter(|(_, v)| listed.insert(v.id))
+                .filter_map(|(_, v)| Some(SessionFile { path: path(v)?, page: v.current }))
+                .take(MAX_FILES)
+                .collect();
             let active = self.active.and_then(|i| self.views.get(i)).and_then(path);
             LastSession { files, active }
         }

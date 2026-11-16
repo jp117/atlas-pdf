@@ -19,6 +19,8 @@ pdfcraft-ui-egui = { workspace = true }
 # `build_info`: the version and compile-time build label for `--version` and the log.
 pdfcraft-engine = { workspace = true }
 pdfcraft-atlas = { workspace = true }
+# `owner_only`: the --control file is restricted to its user on Windows (#3922).
+pdfcraft-platform = { workspace = true }
 # wgpu draws; OpenGL (glow) is the fallback when wgpu can't start on an old or unusual GPU or
 # driver (#461, #435, #392), and can be chosen with PDFCRAFT_RENDERER=gl.
 eframe = { workspace = true, features = ["default_fonts", "wgpu", "glow", "accesskit", "wayland", "x11", "persistence", "links", "clipboard"] }
@@ -75,6 +77,10 @@ velopack = { version = "=1.2.161", features = ["public-utils"] }
 # Atlas fork: Setup's hooks offer Atlas PDF for PDFs under HKEY_CURRENT_USER
 # (src/atlas_register.rs). A safe registry API, already in the lockfile (hyper-util, a build dependency).
 windows-registry = "0.6"
+# Full-resolution taskbar and Alt+Tab icon (`ICON_BIG`, issue #3818). Set both window icons
+# directly so eframe cannot replace ICON_BIG with a system-sized copy. Already in the tree
+# through eframe and covered by the workspace's winit patch.
+winit = { version = "0.30", default-features = false }
 
 [build-dependencies]
 # Icon + VERSIONINFO for pdfcraft.exe; build.rs only uses it when targeting Windows.

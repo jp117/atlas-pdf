@@ -9,9 +9,14 @@ use pdfcraft_ui_egui::PdfCraftApp;
 /// One page with layers Red (on) and Green (off), a radio-button group, each drawing a band;
 /// a "show-red" push button turns Red on and a link toggles Green.
 fn fixture() -> Vec<u8> {
+    fixture_with("")
+}
+
+/// [`fixture`] with `order` added to the default configuration.
+fn fixture_with(order: &str) -> Vec<u8> {
     let content = "/OC /R BDC 1 0 0 rg 20 300 260 40 re f EMC /OC /G BDC 0 1 0 rg 20 240 260 40 re f EMC";
     let objs = [
-        "<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [7 0 R] >> /OCProperties << /OCGs [5 0 R 6 0 R] /D << /OFF [6 0 R] /RBGroups [[5 0 R 6 0 R]] >> >> >>".to_string(),
+        format!("<< /Type /Catalog /Pages 2 0 R /AcroForm << /Fields [7 0 R] >> /OCProperties << /OCGs [5 0 R 6 0 R] /D << /OFF [6 0 R] /RBGroups [[5 0 R 6 0 R]] {order} >> >> >>"),
         "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".into(),
         "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 400] /Contents 4 0 R /Resources << /Properties << /R 5 0 R /G 6 0 R >> >> /Annots [7 0 R 8 0 R] >>".into(),
         format!("<< /Length {} >>\nstream\n{content}\nendstream", content.len()),
@@ -36,10 +41,14 @@ fn fixture() -> Vec<u8> {
 }
 
 fn harness(setup: impl FnOnce(&mut PdfCraftApp) + 'static) -> Harness<'static, PdfCraftApp> {
+    harness_with(fixture(), setup)
+}
+
+fn harness_with(pdf: Vec<u8>, setup: impl FnOnce(&mut PdfCraftApp) + 'static) -> Harness<'static, PdfCraftApp> {
     let mut h = Harness::builder().with_size(egui::vec2(1400.0, 900.0)).build_eframe(move |_cc| {
         let mut app = PdfCraftApp::new();
         app.set_option("language", "en").unwrap();
-        app.open_bytes("layers.pdf", None, fixture()).unwrap();
+        app.open_bytes("layers.pdf", None, pdf).unwrap();
         app.set_option("zoom", "150").unwrap();
         setup(&mut app);
         app
@@ -124,3 +133,8 @@ fn layer_options_reset_to_initial_visibility() {
     assert!(!doc.dirty, "showing and hiding layers doesn't change the document");
     assert_eq!(doc.can_undo(), None, "nor is it an edit to undo");
 }
+
+// Atlas fork: PdfCraft's test of its Layers panel drawing the `/Order` tree (ISO 32000-2 Table 99)
+// is left out. Atlas PDF's panel groups layers by trade or by drawing (`atlas::layers_panel`) and
+// lists every layer; `pdfcraft-render`'s `the_layers_panel_presents_the_order_tree` still checks
+// the tree it is given.
