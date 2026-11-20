@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 
 use crate::printing::{JobOptions, bad, paper_named, spool_job, submit};
 use crate::tools::ToolDef;
-use crate::{Args, Automation, Result, failed, write_atomic};
+use crate::{Args, Automation, Result, ToolError, failed, write_atomic};
 
 /// The value of `paper` and `printer` that asks for the rules to choose.
 const AUTO: &str = "auto";
@@ -34,6 +34,16 @@ fn layout_name(layout: &Layout) -> &'static str {
         Layout::Booklet { .. } => "booklet",
         Layout::Poster { .. } => "poster",
         Layout::Label { .. } => "label",
+    }
+}
+
+/// The spooler refusing a job for `printer` (`None` for the default), saying which printer. Its
+/// own message doesn't always name it ("the print spooler is not available" where CUPS isn't
+/// installed), and a split job goes to more than one.
+pub(crate) fn spooler_refused(printer: Option<&str>, e: impl std::fmt::Display) -> ToolError {
+    match printer {
+        None | Some("default") => failed(format!("couldn't print to the default printer: {e}")),
+        Some(printer) => failed(format!("couldn't print to {printer}: {e}")),
     }
 }
 
@@ -447,5 +457,14 @@ mod tests {
     fn rule_entries_serialise_as_the_tool_describes_them() {
         let rule = print_rules::PrinterRule { paper: "A4".into(), printer: "P".into() };
         assert_eq!(json!(rule), json!({ "paper": "A4", "printer": "P" }));
+    }
+
+    #[test]
+    fn a_refused_job_names_its_printer() {
+        let said = "the print spooler is not available";
+        assert_eq!(spooler_refused(Some("Plotter_D"), said).to_string(), "couldn't print to Plotter_D: the print spooler is not available");
+        for default in [None, Some("default")] {
+            assert_eq!(spooler_refused(default, said).to_string(), "couldn't print to the default printer: the print spooler is not available");
+        }
     }
 }

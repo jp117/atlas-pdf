@@ -286,7 +286,8 @@ impl JobOptions {
 pub(crate) fn submit(bytes: Vec<u8>, mut job: spool::Job) -> Result<Value> {
     let flatten = job.printer.as_deref().is_some_and(spool::gdi_driver);
     let bytes = pdfcraft_engine::spooler::spooler_copy(bytes, &mut job, flatten);
-    Ok(json!(spool::submit(&bytes, &job).map_err(|e| failed(e.to_string()))?))
+    // Atlas fork: the error names the printer, which the spooler's own message may not.
+    Ok(json!(spool::submit(&bytes, &job).map_err(|e| crate::atlas_print::spooler_refused(job.printer.as_deref(), e))?))
 }
 
 impl Automation {
