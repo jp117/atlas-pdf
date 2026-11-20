@@ -37,7 +37,7 @@ const HOOKS: &[(&str, usize)] = &[
     ("crates/automation/src/atlas_print.rs", 1),
     ("crates/automation/src/comments.rs", 1),
     ("crates/automation/src/lib.rs", 3),
-    ("crates/automation/src/printing.rs", 3),
+    ("crates/automation/src/printing.rs", 4),
     ("crates/automation/src/tools.rs", 1),
     ("crates/automation/tests/it/atlas_print.rs", 1),
     ("crates/engine/src/comments.rs", 1),
