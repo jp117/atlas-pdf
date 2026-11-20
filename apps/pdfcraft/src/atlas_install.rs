@@ -46,11 +46,7 @@ pub fn startup() {
     setup_hooks(VelopackApp::build().set_auto_apply_on_startup(false)).run();
     #[cfg(target_os = "linux")]
     if let Some(appimage) = std::env::var_os("APPIMAGE") {
-        // Off the main thread: it reads and may write files, and the window shouldn't wait.
-        let spawned = std::thread::Builder::new().name("launcher-entry".into()).spawn(move || launcher_entry(Path::new(&appimage)));
-        if let Err(e) = spawned {
-            log::warn!("couldn't add Atlas PDF to the applications menu: {e}");
-        }
+        launcher_entry(Path::new(&appimage));
     }
     let source = Feed { base: std::env::var(FEED_VARIABLE).unwrap_or_else(|_| FEED.to_string()) };
     // Full packages only: deltas would have to come from older releases than `latest`.
@@ -95,10 +91,19 @@ fn launcher_entry(appimage: &Path) {
         .filter(|p| p.is_absolute())
         .or_else(|| std::env::home_dir().map(|home| home.join(".local/share")));
     let Some(data) = data else { return };
+    // Two small files, read and only written when they changed: here, so a launch that exits at
+    // once (`--version`, or one that hands its files to the running window) still writes them.
     match write_launcher_entry(appimage, &data) {
-        // Refresh the cache "Open with" reads; desktops without the tool rescan by themselves.
+        // Refresh the cache "Open with" reads, off the main thread as it can take a moment;
+        // desktops without the tool rescan by themselves.
         Ok(true) => {
-            if let Err(e) = std::process::Command::new("update-desktop-database").arg(data.join("applications")).status() {
+            let applications = data.join("applications");
+            let refresh = move || {
+                if let Err(e) = std::process::Command::new("update-desktop-database").arg(&applications).status() {
+                    log::info!("update-desktop-database: {e}");
+                }
+            };
+            if let Err(e) = std::thread::Builder::new().name("update-desktop-database".into()).spawn(refresh) {
                 log::info!("update-desktop-database: {e}");
             }
         }

@@ -65,7 +65,7 @@ mkdir -p "$OUT"
 vpk pack --packId "$PACK_ID" --packVersion "$VERSION" --packDir "$STAGE" --mainExe AtlasPDF \
   --packTitle 'Atlas PDF' --packAuthors 'Atlas Switch' \
   --icon "$ROOT/assets/app-icon/hicolor/256x256/apps/ai.storyteller.pdfcraft.png" \
-  --categories 'Office;Viewer;Graphics' --delta None --outputDir "$OUT"
+  --categories 'Office;Viewer' --delta None --outputDir "$OUT"
 
 # The Windows job publishes into the same release: a Linux file of the same name would replace
 # a Windows one.

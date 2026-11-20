@@ -39,7 +39,10 @@ update itself.
    ~/Applications/AtlasSwitch.AtlasPDF.AppImage
    ```
 
-   It runs on Ubuntu 22.04 and anything newer (glibc 2.35 or later).
+   It runs on Ubuntu 22.04 and anything newer (glibc 2.35 or later). It needs FUSE, which desktop
+   installs have. If it says no `fusermount` was found, install `fuse3`
+   (`sudo apt install fuse3`); `libfuse2` isn't needed. Inside a container without FUSE,
+   `AtlasSwitch.AtlasPDF.AppImage --appimage-extract-and-run` runs it anyway.
 2. On every start it adds itself to the applications menu and to *Open with* for PDFs
    (`~/.local/share/applications/AtlasSwitch.AtlasPDF.desktop`, written again if you move the
    AppImage). To make it the PDF default:

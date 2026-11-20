@@ -25,7 +25,7 @@ pub fn for_appimage(appimage: &std::path::Path) -> Option<String> {
          Terminal=false\n\
          StartupNotify=true\n\
          StartupWMClass={APP_ID}\n\
-         Categories=Office;Viewer;Graphics;\n\
+         Categories=Office;Viewer;\n\
          MimeType=application/pdf;\n\
          Keywords=pdf;takeoff;drawings;viewer;\n",
         value(&quoted(path)),
