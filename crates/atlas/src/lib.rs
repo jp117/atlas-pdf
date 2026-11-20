@@ -5,7 +5,8 @@
 //! - [`layers`]: group CAD layer names (NCS discipline designators, xref prefixes, per-page
 //!   containers from combined files) and turn panel actions into layer visibility changes.
 //!   Pure logic.
-//! - [`brand`]: the app's name and the name of its per-user folders.
+//! - [`brand`]: the app's name, the name of its per-user folders and its Linux desktop id.
+//! - [`desktop_entry`]: the launcher entry the Linux AppImage writes for itself.
 //! - [`print_rules`]: which printer and paper a document's pages belong on.
 //! - [`printer_papers`]: which papers a printer's driver takes.
 //! - [`takeoff`]: takeoff marks (included / included with comments / excluded) stored as
@@ -14,6 +15,7 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
 pub mod brand;
+pub mod desktop_entry;
 pub mod layers;
 pub mod print_rules;
 pub mod printer_papers;

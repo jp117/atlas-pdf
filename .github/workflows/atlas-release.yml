@@ -1,7 +1,7 @@
-# Atlas fork: build Atlas PDF's Windows installer and publish it as a GitHub Release, which
-# installed copies update from (docs/releasing-atlas.md). Run by hand:
+# Atlas fork: build Atlas PDF's Windows installer and Linux AppImage and publish them as one
+# GitHub Release, which installed copies update from (docs/releasing-atlas.md). Run by hand:
 #   gh workflow run atlas-release.yml                   # publish v<Cargo.toml version>
-#   gh workflow run atlas-release.yml -f publish=false  # build only: the files become a workflow artifact
+#   gh workflow run atlas-release.yml -f publish=false  # build only: the files become workflow artifacts
 name: Atlas release
 
 on:
@@ -96,3 +96,84 @@ jobs:
             --outputDir dist/atlas --publish --releaseName "Atlas PDF v$env:VERSION" --tag "v$env:VERSION" `
             --targetCommitish $env:GITHUB_SHA @pre
           if ($LASTEXITCODE -ne 0) { exit 1 }
+
+  linux:
+    # The oldest supported Ubuntu: the AppImage needs a glibc at least as new as the one it was
+    # built against (2.35 here).
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    env:
+      CRAFT_FONTS_DIR: ${{ github.workspace }}/craft-fonts
+      CRAFT_FONTS_REQUIRED: "1"
+      CRAFT_I18N_DIR: ${{ github.workspace }}/craft-i18n
+      CRAFT_I18N_REQUIRED: "1"
+      VPK_VERSION: "1.2.161"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: storytold/craft-fonts
+          ref: b076417b5880bd4154bd22f00695b1d28c6bea83
+          path: craft-fonts
+      - name: Translations
+        run: |
+          set -euo pipefail
+          rev="$(head -n 1 craft-i18n.rev | tr -d '[:space:]')"
+          git init craft-i18n
+          git -C craft-i18n fetch --depth 1 https://github.com/storytold/craft-i18n "$rev"
+          git -C craft-i18n checkout FETCH_HEAD
+      # egui/winit and the file dialogs.
+      - name: Build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libxkbcommon-dev libwayland-dev libx11-dev \
+            libxrandr-dev libxi-dev libgl1-mesa-dev libgtk-3-dev
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Version
+        id: version
+        env:
+          OVERRIDE: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if [[ -n "$OVERRIDE" ]]; then cargo xtask version set "$OVERRIDE"; fi
+          echo "version=$(cargo xtask version | tail -n 1 | tr -d '[:space:]')" >> "$GITHUB_OUTPUT"
+      - name: Install vpk
+        run: dotnet tool install -g vpk --version "$VPK_VERSION"
+      - name: Package
+        run: packaging/linux/package-atlas.sh
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: atlas-pdf-${{ steps.version.outputs.version }}-linux
+          path: dist/atlas-linux
+
+  # Adds the Linux files to the release the Windows job published, once both have built.
+  publish-linux:
+    if: ${{ inputs.publish }}
+    needs: [windows, linux]
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    env:
+      VPK_VERSION: "1.2.161"
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: atlas-pdf-${{ needs.linux.outputs.version }}-linux
+          path: dist/atlas-linux
+      - name: Install vpk
+        run: dotnet tool install -g vpk --version "$VPK_VERSION"
+      - name: Publish
+        env:
+          VERSION: ${{ needs.linux.outputs.version }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          pre=()
+          if [[ "$VERSION" == *-* ]]; then pre=(--pre); fi
+          vpk upload github --repoUrl "https://github.com/$GITHUB_REPOSITORY" --token "$GH_TOKEN" \
+            --outputDir dist/atlas-linux --merge --publish --releaseName "Atlas PDF v$VERSION" --tag "v$VERSION" \
+            --targetCommitish "$GITHUB_SHA" "${pre[@]}"

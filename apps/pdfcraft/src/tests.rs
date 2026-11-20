@@ -724,9 +724,10 @@ fn torn_off_windows_carry_the_app_id() {
     assert_eq!(pdfcraft_ui_egui::windows::APP_ID, super::APP_ID);
 }
 
+/// Atlas fork: the launcher entry Atlas ships is the one the AppImage writes, not PdfCraft's.
 #[test]
 fn the_desktop_entry_names_the_window_class() {
-    let entry = include_str!("../../../packaging/linux/ai.storyteller.pdfcraft.desktop");
+    let entry = pdfcraft_atlas::desktop_entry::for_appimage(std::path::Path::new("/opt/AtlasSwitch.AtlasPDF.AppImage")).unwrap();
     let class = entry.lines().find_map(|line| line.strip_prefix("StartupWMClass="));
     assert_eq!(class, Some(super::APP_ID));
 }
