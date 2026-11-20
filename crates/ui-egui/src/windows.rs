@@ -36,9 +36,9 @@ impl WindowId {
     }
 }
 
-/// Freedesktop app id of every window: the `.desktop` file name and the hicolor icon name
-/// (`packaging/linux/ai.storyteller.pdfcraft.desktop`).
-pub const APP_ID: &str = "ai.storyteller.pdfcraft";
+/// Freedesktop app id of every window: the `.desktop` file name and the hicolor icon name.
+/// Atlas fork: Atlas PDF's, which the AppImage's launcher entry carries (`pdfcraft_atlas::desktop_entry`).
+pub const APP_ID: &str = pdfcraft_atlas::brand::APP_ID;
 
 /// How many windows may be open at once (the main window included).
 pub const MAX_WINDOWS: usize = 16;

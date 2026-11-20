@@ -36,8 +36,8 @@ use pdfcraft_ui_egui::PdfCraftApp;
 
 #[cfg(target_os = "macos")]
 mod apple_events;
-// Atlas fork: Setup's hooks and in-place updates.
-#[cfg(target_os = "windows")]
+// Atlas fork: Setup's hooks and in-place updates; the Linux AppImage's updates and menu entry.
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 mod atlas_install;
 #[cfg(target_os = "windows")]
 mod atlas_register;
@@ -58,7 +58,8 @@ mod windows_manifest;
 
 /// Freedesktop app id: the `.desktop` file name and the hicolor icon name (the macOS bundle id
 /// too, which `xtask` checks against this line). The windows torn off a tab carry the same.
-const APP_ID: &str = "ai.storyteller.pdfcraft";
+// Atlas fork: the AppImage's launcher entry names this id (pdfcraft_atlas::brand::APP_ID).
+const APP_ID: &str = pdfcraft_atlas::brand::APP_ID;
 
 /// The app icon (assets/app-icon/README.md). macOS gets the version on Apple's icon grid, with a
 /// transparent margin; Windows and Linux get the full-bleed tile.
@@ -229,7 +230,7 @@ fn main() -> eframe::Result {
         }
     }));
     // Atlas fork: Setup's install, update and uninstall hooks are answered here, and exit.
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
     atlas_install::startup();
     let mut startup = startup::Arguments::parse(std::env::args().skip(1));
     if startup.version {
@@ -312,7 +313,7 @@ fn main() -> eframe::Result {
         other => other,
     };
     // Atlas fork: a downloaded update installs once the window has closed.
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
     atlas_install::install_on_exit();
     result
 }
@@ -349,7 +350,7 @@ fn native_options(integrated: bool, app_frame: bool, renderer: eframe::Renderer)
         .with_inner_size([1440.0, 920.0])
         .with_min_inner_size(pdfcraft_ui_egui::MIN_WINDOW_SIZE)
         .with_drag_and_drop(true)
-        // Wayland app id: matches packaging/linux/ai.storyteller.pdfcraft.desktop.
+        // Wayland app id. Atlas fork: matches the AppImage's launcher entry (pdfcraft_atlas::desktop_entry).
         .with_app_id(APP_ID);
     // eframe replaces ICON_BIG with a system-sized icon on its first active frame.
     // An explicitly empty icon disables that setter (None selects eframe's default).
@@ -487,8 +488,8 @@ fn app_creator<'a>(
             app.motion.source = Some(motion::source());
         }
         app.update_source = Some(std::sync::Arc::new(updates::latest_release));
-        // Atlas fork: copies installed by Setup update themselves.
-        #[cfg(target_os = "windows")]
+        // Atlas fork: copies installed by Setup, and the AppImage, update themselves.
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
         atlas_install::attach(&mut app);
         app.printer_source = Some(pdfcraft_ui_egui::system_printers());
         // Atlas fork: the Print dialog follows the printer rules.

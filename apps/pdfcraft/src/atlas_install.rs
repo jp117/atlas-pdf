@@ -1,11 +1,14 @@
-//! Atlas fork: copies installed by Atlas PDF's Setup (Velopack, `packaging/windows/package-atlas.ps1`)
-//! update themselves from the latest GitHub release.
+//! Atlas fork: copies installed by Atlas PDF's Setup on Windows, and the Linux AppImage (both
+//! Velopack: `packaging/windows/package-atlas.ps1`, `packaging/linux/package-atlas.sh`), update
+//! themselves from the latest GitHub release.
 //!
-//! [`startup`] runs first in `main`: Setup and the updater start the app with hook arguments,
-//! which are answered here before the process exits. An installed copy then checks for a newer
-//! release, downloads it in the background (`pdfcraft_ui_egui::updates::Updater`), and
-//! [`install_on_exit`] hands it to Velopack's updater as the app closes. Development builds, the
-//! portable zip and `install-atlas.ps1` copies aren't installed by Setup: none of this applies there.
+//! [`startup`] runs first in `main`: on Windows, Setup and the updater start the app with hook
+//! arguments, which are answered here before the process exits. An installed copy then checks for
+//! a newer release, downloads it in the background (`pdfcraft_ui_egui::updates::Updater`), and
+//! [`install_on_exit`] hands it to Velopack's updater as the app closes, which replaces the
+//! installed files (on Linux, the AppImage itself). Development builds, the portable zip and
+//! `install-atlas.ps1` copies aren't installed by Velopack: none of this applies there. On Linux
+//! the AppImage also writes its own launcher entry, which Velopack doesn't.
 
 use std::io::Write;
 use std::path::Path;
@@ -33,20 +36,22 @@ const MAX_PACKAGE: u64 = 2 << 30;
 static INSTALLED: OnceLock<Arc<Installed>> = OnceLock::new();
 
 /// The first start after Setup installed the app.
+#[cfg(target_os = "windows")]
 static FIRST_RUN: AtomicBool = AtomicBool::new(false);
 
 /// Answer Setup's hooks (they exit), then look for the installation this copy belongs to.
 pub fn startup() {
-    VelopackApp::build()
-        // A downloaded update installs when the app closes, never as it starts: a second launch
-        // that only hands its files to the running window must not replace that window's files.
-        .set_auto_apply_on_startup(false)
-        .on_after_install_fast_callback(|_| registered(crate::atlas_register::register()))
-        // An update may move or rename things: write every value again.
-        .on_after_update_fast_callback(|_| registered(crate::atlas_register::register()))
-        .on_before_uninstall_fast_callback(|_| crate::atlas_register::unregister())
-        .on_first_run(|_| FIRST_RUN.store(true, Ordering::SeqCst))
-        .run();
+    // A downloaded update installs when the app closes, never as it starts: a second launch that
+    // only hands its files to the running window must not replace that window's files.
+    setup_hooks(VelopackApp::build().set_auto_apply_on_startup(false)).run();
+    #[cfg(target_os = "linux")]
+    if let Some(appimage) = std::env::var_os("APPIMAGE") {
+        // Off the main thread: it reads and may write files, and the window shouldn't wait.
+        let spawned = std::thread::Builder::new().name("launcher-entry".into()).spawn(move || launcher_entry(Path::new(&appimage)));
+        if let Err(e) = spawned {
+            log::warn!("couldn't add Atlas PDF to the applications menu: {e}");
+        }
+    }
     let source = Feed { base: std::env::var(FEED_VARIABLE).unwrap_or_else(|_| FEED.to_string()) };
     // Full packages only: deltas would have to come from older releases than `latest`.
     let options = UpdateOptions { MaximumDeltasBeforeFallback: -1, ..Default::default() };
@@ -60,18 +65,87 @@ pub fn startup() {
     }
 }
 
+/// Setup's install, update and uninstall hooks, which register Atlas PDF for PDFs. Windows only: the
+/// AppImage has no installer, and writes its menu entry as it starts instead.
+fn setup_hooks(app: VelopackApp<'_>) -> VelopackApp<'_> {
+    #[cfg(target_os = "windows")]
+    let app = app
+        .on_after_install_fast_callback(|_| registered(crate::atlas_register::register()))
+        // An update may move or rename things: write every value again.
+        .on_after_update_fast_callback(|_| registered(crate::atlas_register::register()))
+        .on_before_uninstall_fast_callback(|_| crate::atlas_register::unregister())
+        .on_first_run(|_| FIRST_RUN.store(true, Ordering::SeqCst));
+    app
+}
+
+#[cfg(target_os = "windows")]
 fn registered(result: Result<(), String>) {
     if let Err(e) = result {
         log::error!("couldn't offer Atlas PDF for PDFs: {e}");
     }
 }
 
-/// Let an installed copy's window update it. On the first start, open Settings ▸ Default apps at
-/// Atlas PDF, since Windows leaves choosing the app for PDFs to the user.
+/// The AppImage's launcher entry and icon in the user's data folder, written again whenever they
+/// differ (the AppImage moved, or an update changed them), so the applications menu lists Atlas PDF
+/// and "Open with" offers it for PDFs. Deleting the AppImage hides the entry (its `TryExec`).
+#[cfg(target_os = "linux")]
+fn launcher_entry(appimage: &Path) {
+    let data = std::env::var_os("XDG_DATA_HOME")
+        .map(std::path::PathBuf::from)
+        .filter(|p| p.is_absolute())
+        .or_else(|| std::env::home_dir().map(|home| home.join(".local/share")));
+    let Some(data) = data else { return };
+    match write_launcher_entry(appimage, &data) {
+        // Refresh the cache "Open with" reads; desktops without the tool rescan by themselves.
+        Ok(true) => {
+            if let Err(e) = std::process::Command::new("update-desktop-database").arg(data.join("applications")).status() {
+                log::info!("update-desktop-database: {e}");
+            }
+        }
+        Ok(false) => {}
+        Err(e) => log::warn!("couldn't add Atlas PDF to the applications menu: {e}"),
+    }
+}
+
+/// [`launcher_entry`] under the data folder `data`. Whether the entry changed.
+#[cfg(target_os = "linux")]
+fn write_launcher_entry(appimage: &Path, data: &Path) -> std::io::Result<bool> {
+    use pdfcraft_atlas::brand::APP_ID;
+    let entry = pdfcraft_atlas::desktop_entry::for_appimage(appimage)
+        .ok_or_else(|| std::io::Error::other(format!("the AppImage's path {} can't be written in one", appimage.display())))?;
+    let icon = data.join("icons/hicolor/256x256/apps").join(format!("{APP_ID}.png"));
+    if let Err(e) = write_if_changed(&icon, crate::APP_ICON_PNG) {
+        log::warn!("couldn't install the menu icon {}: {e}", icon.display());
+    }
+    write_if_changed(&data.join("applications").join(format!("{APP_ID}.desktop")), entry.as_bytes())
+}
+
+/// Replace `path` with `bytes` unless it holds them already, through a temporary file beside it so
+/// a desktop scanning the folder never reads half a file. Whether it wrote.
+#[cfg(target_os = "linux")]
+fn write_if_changed(path: &Path, bytes: &[u8]) -> std::io::Result<bool> {
+    if std::fs::read(path).is_ok_and(|old| old == bytes) {
+        return Ok(false);
+    }
+    let dir = path.parent().ok_or_else(|| std::io::Error::other("no parent folder"))?;
+    std::fs::create_dir_all(dir)?;
+    let name = path.file_name().ok_or_else(|| std::io::Error::other("no file name"))?;
+    let temporary = dir.join(format!(".{}.{}.tmp", name.to_string_lossy(), std::process::id()));
+    std::fs::write(&temporary, bytes)?;
+    if let Err(e) = std::fs::rename(&temporary, path) {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(e);
+    }
+    Ok(true)
+}
+
+/// Let an installed copy's window update it. On Windows, on the first start, open Settings ▸
+/// Default apps at Atlas PDF, since Windows leaves choosing the app for PDFs to the user.
 pub fn attach(app: &mut PdfCraftApp) {
     if let Some(installed) = INSTALLED.get() {
         app.set_updater(Arc::clone(installed) as Arc<dyn Updater>);
     }
+    #[cfg(target_os = "windows")]
     if FIRST_RUN.load(Ordering::SeqCst) {
         match std::process::Command::new("explorer.exe").arg("ms-settings:defaultapps?registeredAppUser=Atlas%20PDF").spawn() {
             Ok(_) => {
@@ -274,5 +348,29 @@ Connection: close
         for base in ["https://example.com/feed", "https://example.com/feed/"] {
             assert_eq!(Feed { base: base.into() }.url("releases.win.json"), "https://example.com/feed/releases.win.json");
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_appimage_writes_its_menu_entry_once_and_again_when_moved() {
+        let data = std::env::temp_dir().join(format!("atlas-launcher-entry-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&data);
+        let entry = data.join("applications/AtlasSwitch.AtlasPDF.desktop");
+        let icon = data.join("icons/hicolor/256x256/apps/AtlasSwitch.AtlasPDF.png");
+
+        assert!(write_launcher_entry(Path::new("/opt/a/AtlasSwitch.AtlasPDF.AppImage"), &data).unwrap());
+        assert!(std::fs::read_to_string(&entry).unwrap().contains("Exec=\"/opt/a/AtlasSwitch.AtlasPDF.AppImage\" %U\n"));
+        assert_eq!(std::fs::read(&icon).unwrap(), crate::APP_ICON_PNG);
+        // Nothing changed: nothing is written, so the desktop isn't asked to rescan.
+        assert!(!write_launcher_entry(Path::new("/opt/a/AtlasSwitch.AtlasPDF.AppImage"), &data).unwrap());
+        // Moved: the entry follows it.
+        assert!(write_launcher_entry(Path::new("/opt/b/AtlasSwitch.AtlasPDF.AppImage"), &data).unwrap());
+        assert!(std::fs::read_to_string(&entry).unwrap().contains("/opt/b/"));
+        // A path no entry can hold leaves the last one alone.
+        assert!(write_launcher_entry(Path::new("/opt/c\nExec=x"), &data).is_err());
+        assert!(std::fs::read_to_string(&entry).unwrap().contains("/opt/b/"));
+        let leftovers: Vec<_> = std::fs::read_dir(data.join("applications")).unwrap().flatten().map(|e| e.file_name()).collect();
+        assert_eq!(leftovers.len(), 1, "no temporary files left: {leftovers:?}");
+        let _ = std::fs::remove_dir_all(&data);
     }
 }
