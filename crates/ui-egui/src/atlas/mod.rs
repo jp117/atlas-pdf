@@ -11,6 +11,7 @@ pub(crate) mod print_rules_ui;
 pub(crate) mod printer_papers;
 mod takeoff_panel;
 mod takeoff_tool;
+pub(crate) mod tear_off;
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) mod updates;
 
@@ -36,6 +37,8 @@ pub(crate) struct AtlasState {
     /// Updating an installed copy.
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) updates: updates::UpdateState,
+    /// A tab torn off its strip, carried in its own window while the button is held.
+    pub(crate) tear_off: Option<tear_off::TornTab>,
 }
 
 impl AtlasState {

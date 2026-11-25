@@ -74,15 +74,22 @@ It also:
 ### Tabs in several windows
 
 Drag a document tab down out of the tab strip and let go: it opens in a window of its own, with
-its unsaved changes and undo history. Drag a tab onto another Atlas PDF window's tab strip and it
-joins that window at the gap under the pointer, which also takes it back to the window it came
-from. Dropped anywhere else in a window, it goes after the last tab. Escape cancels a drag. A
-tab's right-click menu has **Move to new window** and **Move to window**, and the **Window** menu
-can merge every window back into one.
+its unsaved changes and undo history. Drag it past the edge of the window and the new window comes
+along at once, staying under the pointer while you hold the button, onto any monitor, and stays
+where you let go. Taken from a maximized window and dropped on another monitor, it opens maximized
+there; otherwise it is never bigger than the monitor it lands on. Inside the window a drag works as
+before: the right half of the page splits the view. Carry it over any window's tab strip, the one it came from included, and the window steps
+aside while a line marks where the tab will land; let go there and it joins that strip. Escape
+puts the tab back where it was. A tab's right-click menu has **Move to new window** and
+**Move to window**, and the **Window** menu can merge every window back into one.
 
-This is PdfCraft's pull request
+On Wayland, which doesn't let apps place windows, the tab's window opens when you let go instead,
+and a tab dropped on another window opens its own window (use **Move to window**).
+
+This started as PdfCraft's pull request
 [storytold/pdfcraft#3483](https://github.com/storytold/pdfcraft/pull/3483), merged into Atlas
-before upstream has merged it.
+before upstream has merged it. Carrying the tab in its own window is Atlas's
+(`ui-egui/src/atlas/tear_off.rs`).
 
 ### Printing drawings by page size
 
@@ -155,6 +162,7 @@ code is kept out of upstream files so merges stay cheap:
 | `crates/ui-egui/src/atlas/print_routing.rs`, `print_rules_ui.rs` | The Print dialog following the rules; Preferences ▸ Printer rules |
 | `crates/atlas/src/printer_papers.rs`, `crates/ui-egui/src/atlas/printer_papers.rs` | Which papers a printer's driver takes, and keeping Print's paper to them |
 | `crates/automation/src/atlas_print.rs`    | `doc_print`'s `auto` mode, `print_plan`, `print_rules*`           |
+| `crates/ui-egui/src/atlas/tear_off.rs`    | A dragged-out tab carried in its own window, across monitors      |
 
 Upstream files carry one- to three-line hooks, each marked `Atlas fork`:
 - `engine/src/{edit,edit/labels,edit/run,history,document,comments,error}.rs`: the takeoff edits

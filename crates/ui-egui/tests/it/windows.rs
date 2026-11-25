@@ -121,6 +121,83 @@ fn a_tab_dropped_on_another_window_joins_its_strip_where_the_pointer_is() {
     assert_eq!(h.state().window_count(), 2, "the main window stays, empty");
 }
 
+/// Move the held pointer to `to` in steps.
+fn carry(h: &mut Harness<'static, PdfCraftApp>, from: egui::Pos2, to: egui::Pos2) {
+    for k in 1..=4 {
+        h.event(egui::Event::PointerMoved(from.lerp(to, k as f32 / 4.0)));
+        h.run_steps(1);
+    }
+    h.run_steps(2);
+}
+
+fn release(h: &mut Harness<'static, PdfCraftApp>, at: egui::Pos2) {
+    h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE });
+    h.run_steps(4);
+}
+
+/// Atlas fork: a tab dragged out of its window is in a window of its own before the button
+/// comes up, and that window keeps the tab under the pointer wherever it goes.
+#[test]
+fn a_tab_dragged_out_of_the_window_comes_along_in_its_own_window() {
+    let mut h = harness(&["first.pdf", "middle.pdf", "last.pdf"]);
+    // Past the window's left edge (where another monitor would be).
+    let out = egui::pos2(-150.0, 300.0);
+    drag_tab(&mut h, "first.pdf", out, false, false);
+    h.run_steps(3);
+    assert_eq!(h.state().window_count(), 2, "the window opened while the button is held");
+    assert_eq!(names(h.state()), ["middle.pdf", "last.pdf"]);
+    let second = second_window(&h);
+    assert_eq!(names_in(&mut h, second), ["first.pdf"]);
+    let near = |h: &Harness<'static, PdfCraftApp>, p: egui::Pos2| {
+        let tab = tab_rect(h, "first.pdf");
+        assert!((tab.center() - p).length() < 4.0, "the tab {tab:?} is under the pointer {p:?}");
+    };
+    // Back over the window's pages: the window comes along (here it is drawn inside the main
+    // window, which keeps it on screen, so it is checked where the main window can show it).
+    let inside = egui::pos2(420.0, 260.0);
+    carry(&mut h, out, inside);
+    near(&h, inside);
+    let further = inside + egui::vec2(140.0, 70.0);
+    carry(&mut h, inside, further);
+    near(&h, further);
+    release(&mut h, further);
+    assert_eq!(h.state().window_count(), 2);
+    assert_eq!(names_in(&mut h, second), ["first.pdf"]);
+    assert_eq!(h.state().focused_window(), second);
+    near(&h, further);
+}
+
+/// Atlas fork: a carried tab dropped back on the strip it came from goes where the pointer is,
+/// and its window closes; Escape while carrying puts it back where it was.
+#[test]
+fn a_carried_tab_goes_back_onto_a_strip_or_home_on_escape() {
+    let mut h = harness(&["first.pdf", "middle.pdf", "last.pdf"]);
+    let ids: Vec<_> = h.state().views.iter().map(|v| v.id).collect();
+    let strip = tab_rect(&h, "first.pdf");
+    let after_last = tab_rect(&h, "last.pdf").right_center() + egui::vec2(20.0, 0.0);
+    let out = egui::pos2(strip.center().x, -120.0);
+    drag_tab(&mut h, "first.pdf", out, false, false);
+    h.run_steps(3);
+    assert_eq!(h.state().window_count(), 2);
+    carry(&mut h, out, after_last);
+    assert_eq!(h.state().window_count(), 2, "still carried while held over the strip");
+    release(&mut h, after_last);
+    assert_eq!(h.state().window_count(), 1, "the carrying window closed");
+    assert_eq!(h.state().views.iter().map(|v| v.id).collect::<Vec<_>>(), [ids[1], ids[2], ids[0]]);
+    // Out again, then Escape: back at the end, where it was.
+    let out = egui::pos2(1600.0, 300.0);
+    drag_tab(&mut h, "first.pdf", out, false, false);
+    h.run_steps(3);
+    assert_eq!(h.state().window_count(), 2);
+    h.event(egui::Event::Key { key: egui::Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE });
+    h.run_steps(3);
+    assert_eq!(h.state().window_count(), 1);
+    assert_eq!(h.state().views.iter().map(|v| v.id).collect::<Vec<_>>(), [ids[1], ids[2], ids[0]]);
+    release(&mut h, out);
+    assert_eq!(h.state().window_count(), 1, "releasing after Escape changes nothing");
+    assert!(!h.state().tab_drag_in_progress());
+}
+
 #[test]
 fn escape_cancels_a_tab_drag_and_a_short_drag_only_reorders() {
     let mut h = harness(&["first.pdf", "middle.pdf", "last.pdf"]);
