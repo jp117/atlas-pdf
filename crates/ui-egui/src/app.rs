@@ -672,6 +672,7 @@ impl PdfCraftApp {
         self.show_child_windows(&ctx);
         // Window changes asked for during the passes, now that no window is being drawn.
         self.apply_window_ops(&ctx);
+        crate::atlas::page_drop::apply(self, &ctx); // Atlas fork: pages dragged to another window's Pages panel.
     }
 }
 
