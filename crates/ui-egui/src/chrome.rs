@@ -260,7 +260,10 @@ pub fn tab_strip(app: &mut PdfCraftApp, ui: &mut egui::Ui) {
                                         // Detaching, or joining another window: no marker here, and a
                                         // badge at the pointer says what releasing does.
                                         ui.ctx().set_cursor_icon(if over.is_some() { egui::CursorIcon::Copy } else { egui::CursorIcon::Grabbing });
-                                        if over.is_none() && app.can_detach(from) {
+                                        // Atlas fork: where windows can be placed, the tab leaves now, in a window that follows the pointer.
+                                        let tab = slots.iter().find(|(i, _)| *i == from).map(|(_, r)| *r);
+                                        if over.is_none() && app.can_detach(from) && !crate::atlas::tear_off::begin(app, ui.ctx(), doc, from, tab, p)
+                                        {
                                             let name = crate::canvas::tab_label(app, from).unwrap_or_default();
                                             detach_badge(ui, &t, p, &name);
                                         }

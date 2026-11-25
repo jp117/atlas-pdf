@@ -16,6 +16,11 @@
 //! Where the desktop tells the app where its windows are (X11, Windows, macOS, and the tests'
 //! embedded windows), a tab dragged over another window joins it; where it doesn't (Wayland),
 //! the tab opens its own window and the context menu's Move to window moves it instead.
+//!
+//! Atlas fork: where windows can be moved, a tab dragged out of its strip leaves it at once, in
+//! a window that follows the pointer until the button comes up (`atlas/tear_off.rs`). Screen
+//! positions here are in physical pixels, the one unit every monitor shares, so windows on
+//! monitors with different scaling line up.
 
 use crate::canvas::DocView;
 use crate::{CloseRequest, Dialog, LeftPanel, Mode, PdfCraftApp, QuickTool, RightPanel};
@@ -51,7 +56,7 @@ const MIN_SIZE: Vec2 = vec2(820.0, 520.0);
 const CASCADE: Vec2 = vec2(40.0, 40.0);
 /// Where the pointer holds a tab dropped into empty space: the new window's top-left is this
 /// far up and left of it, so the tab lands under the pointer.
-const TAB_GRIP: Vec2 = vec2(90.0, 18.0);
+pub(crate) const TAB_GRIP: Vec2 = vec2(90.0, 18.0); // Atlas fork: the tear-off starts here too.
 /// How large a window embedded in the main one is, relative to the size a window would get.
 const EMBEDDED_SCALE: f32 = 0.6;
 
@@ -242,11 +247,49 @@ pub(crate) struct WindowGeometry {
     pub focused: bool,
     /// Whether the app drew the window's frame when it was last synced (see `sync_window_frame`).
     pub app_frame: Option<bool>,
+    // Atlas fork: what the tear-off (`atlas/tear_off.rs`) needs to place and size windows.
+    /// Physical pixels per point the window was last drawn at: its monitor's scale times the
+    /// app's zoom. Multiplying a screen position in points by it gives physical pixels.
+    pub ppp: f32,
+    /// The desktop reported the window's position (or it is embedded), so it can be moved.
+    pub placed: bool,
+    /// How far the window's content starts from its outer top-left (the title bar and
+    /// borders), in points.
+    pub frame: Vec2,
+    /// The window is maximized or full screen.
+    pub maximized: bool,
+    /// The size of the monitor the window is on, in points.
+    pub monitor: Option<Vec2>,
 }
 
 impl Default for WindowGeometry {
     fn default() -> Self {
-        Self { known: false, origin: Pos2::ZERO, rect: Rect::NOTHING, strip: None, tabs: Vec::new(), focused: false, app_frame: None }
+        Self {
+            known: false,
+            origin: Pos2::ZERO,
+            rect: Rect::NOTHING,
+            strip: None,
+            tabs: Vec::new(),
+            focused: false,
+            app_frame: None,
+            ppp: 1.0,
+            placed: false,
+            frame: Vec2::ZERO,
+            maximized: false,
+            monitor: None,
+        }
+    }
+}
+
+impl WindowGeometry {
+    /// The window's content on screen, in physical pixels.
+    pub(crate) fn screen_rect(&self) -> Rect {
+        Rect::from_min_max(self.rect.min * self.ppp, self.rect.max * self.ppp)
+    }
+
+    /// A physical screen position in the window's own coordinates (points).
+    pub(crate) fn local(&self, screen: Pos2) -> Pos2 {
+        Pos2::new(screen.x / self.ppp, screen.y / self.ppp) - self.origin.to_vec2()
     }
 }
 
@@ -256,7 +299,8 @@ impl Default for WindowGeometry {
 pub(crate) struct TabDrag {
     pub doc: DocId,
     pub from: WindowId,
-    /// Where the pointer was last seen, in the dragged-from window's coordinates. When the tab
+    /// Where the pointer was last seen, in the dragged-from window's coordinates (Atlas fork: a
+    /// torn-off tab's in physical screen pixels, see `atlas/tear_off.rs`). When the tab
     /// is released over another window, X11 reports the release and the pointer leaving the
     /// window in one frame (the implicit grab ends), so the release frame has no pointer
     /// position of its own.
@@ -274,7 +318,7 @@ pub(crate) struct TabDrag {
 #[derive(Clone, Debug, PartialEq)]
 pub enum WindowOp {
     /// Move the tab of `doc` out of window `from`: into a new window (`to: None`, placed so
-    /// the tab sits at `at`, a screen position, if given), or into window `to` at a tab
+    /// the tab sits at `at`, a screen position in physical pixels, if given), or into window `to` at a tab
     /// index (`None`: after its last tab).
     MoveTab { doc: DocId, from: WindowId, to: Option<(WindowId, Option<usize>)>, at: Option<Pos2> },
     /// Close the window and its tabs (its unsaved-changes questions have been answered).
@@ -561,6 +605,7 @@ impl PdfCraftApp {
         // A drag that ended without the strip seeing its release (the window lost the pointer)
         // must not leave the other strips marking a drop.
         if let Some(drag) = &self.tab_drag
+            && !crate::atlas::tear_off::carrying(self) // Atlas fork: the torn-off tab's window never has the pointer.
             && !ctx.input_for(drag.from.viewport(), |i| i.pointer.any_down())
         {
             self.tab_drag = None;
@@ -599,9 +644,12 @@ impl PdfCraftApp {
         let layout = self.with_window(from, |a| (a.mode, a.left, a.left_open, a.right, a.all_tools_expanded));
         let (mode, left, left_open, right, all_tools_expanded) =
             layout.unwrap_or((self.mode, self.left, self.left_open, self.right, self.all_tools_expanded));
-        let source = self.window_geometry.get(&from).filter(|g| g.known).map(|g| g.rect);
-        let size = source.map_or(DEFAULT_SIZE, |r| r.size()).max(MIN_SIZE);
-        let pos = at.map(|p| p - TAB_GRIP).or_else(|| source.map(|r| r.min + CASCADE));
+        let source = self.window_geometry.get(&from).filter(|g| g.known);
+        // Atlas fork: a window taken from a maximized one is smaller than its monitor, and `at`
+        // is in physical pixels (the new window has no scale yet: the source's is the best guess).
+        let size = source.map_or(DEFAULT_SIZE, crate::atlas::tear_off::new_window_size).max(MIN_SIZE);
+        let ppp = source.map_or(1.0, |g| g.ppp);
+        let pos = at.map(|p| Pos2::new(p.x / ppp, p.y / ppp) - TAB_GRIP).or_else(|| source.map(|g| g.rect.min + CASCADE));
         let id = WindowId(self.next_window_id);
         self.next_window_id = self.next_window_id.saturating_add(1);
         let state = WindowState { views: vec![view], active: Some(0), mode, left, left_open, right, all_tools_expanded, ..WindowState::default() };
@@ -757,18 +805,30 @@ impl PdfCraftApp {
     /// several windows).
     pub(crate) fn track_window(&mut self, id: WindowId, ctx: &egui::Context, embedded: Option<Rect>) {
         let (inner, focused) = ctx.input(|i| (i.viewport().inner_rect, i.viewport().focused));
-        let root_origin = self.window_geometry.get(&WindowId::ROOT).map_or(Pos2::ZERO, |g| g.origin);
+        // Atlas fork: the window's scale, frame, state and monitor, for the tear-off.
+        let (outer, maximized, monitor) = ctx.input(|i| {
+            (i.viewport().outer_rect, i.viewport().maximized == Some(true) || i.viewport().fullscreen == Some(true), i.viewport().monitor_size)
+        });
+        let root = self.window_geometry.get(&WindowId::ROOT);
+        let (root_origin, root_ppp) = root.map_or((Pos2::ZERO, ctx.pixels_per_point()), |g| (g.origin, g.ppp));
         let geometry = self.window_geometry.entry(id).or_default();
+        geometry.maximized = maximized;
+        geometry.monitor = monitor;
         match (embedded, inner) {
             (Some(rect), _) => {
                 geometry.known = true;
+                geometry.placed = true;
                 geometry.origin = root_origin;
                 geometry.rect = rect.translate(root_origin.to_vec2());
+                geometry.ppp = root_ppp;
             }
             (None, Some(rect)) if rect.is_finite() => {
                 geometry.known = true;
+                geometry.placed = true;
                 geometry.origin = rect.min;
                 geometry.rect = rect;
+                geometry.ppp = ctx.pixels_per_point();
+                geometry.frame = outer.filter(|o| o.is_finite()).map_or(Vec2::ZERO, |o| (rect.min - o.min).max(Vec2::ZERO));
             }
             // Only the main window's place may be unknown and still count: embedded windows
             // are placed in its coordinates. (On Wayland the desktop keeps every window's
@@ -776,10 +836,16 @@ impl PdfCraftApp {
             // other windows stay unknown, so no tab is dropped on the wrong one.)
             (None, None) if id == WindowId::ROOT => {
                 geometry.known = true;
+                // Where the other windows are drawn inside this one, they can be put anywhere in it.
+                geometry.placed = ctx.embed_viewports();
                 geometry.origin = Pos2::ZERO;
                 geometry.rect = ctx.content_rect();
+                geometry.ppp = ctx.pixels_per_point();
             }
-            _ => geometry.known = false,
+            _ => {
+                geometry.known = false;
+                geometry.placed = false;
+            }
         }
         if let Some(focused) = focused {
             geometry.focused = focused;
@@ -796,17 +862,17 @@ impl PdfCraftApp {
         geometry.tabs = tabs;
     }
 
-    /// `local`, a position in the current window, on screen; `None` where the desktop keeps
-    /// the window's place to itself.
+    /// `local`, a position in the current window, on screen in physical pixels; `None` where
+    /// the desktop keeps the window's place to itself.
     pub(crate) fn screen_pos(&self, local: Pos2) -> Option<Pos2> {
         let geometry = self.window_geometry.get(&self.current_window).filter(|g| g.known)?;
-        Some(geometry.origin + local.to_vec2())
+        Some((geometry.origin + local.to_vec2()) * geometry.ppp)
     }
 
-    /// The window under the screen position `screen` other than `except`: the focused one if
-    /// it is there (windows may overlap), otherwise any.
+    /// The window under the physical screen position `screen` other than `except`: the focused
+    /// one if it is there (windows may overlap), otherwise any.
     pub(crate) fn window_under(&self, screen: Pos2, except: WindowId) -> Option<WindowId> {
-        let candidates = || self.window_geometry.iter().filter(|(id, g)| **id != except && g.known && g.rect.contains(screen));
+        let candidates = || self.window_geometry.iter().filter(|(id, g)| **id != except && g.known && g.screen_rect().contains(screen));
         candidates().find(|(_, g)| g.focused).or_else(|| candidates().next()).map(|(id, _)| *id)
     }
 
@@ -815,7 +881,7 @@ impl PdfCraftApp {
     /// the last tab when it is elsewhere in the window.
     pub(crate) fn drop_index_in(&self, target: WindowId, screen: Pos2) -> Option<usize> {
         let geometry = self.window_geometry.get(&target)?;
-        let local = screen - geometry.origin.to_vec2();
+        let local = geometry.local(screen);
         let strip = geometry.strip?;
         if !strip.contains(local) {
             return None;
@@ -870,17 +936,24 @@ impl PdfCraftApp {
                 if let Some(pos) = pos {
                     window = window.default_pos(pos);
                 }
+                // Atlas fork: a torn-off tab's window follows the pointer (a movable window would
+                // put itself back where it was, and the panels' room is no larger than it).
+                if let Some(pos) = crate::atlas::tear_off::embedded_pos(self, id) {
+                    window = window.current_pos(pos).movable(false).constrain_to(ctx.content_rect());
+                }
                 self.with_window(id, |app| {
                     window.show(ctx, |ui| app.window_pass(id, ui, egui::ViewportClass::EmbeddedWindow));
                 });
             } else {
                 let wanted = slot.wanted.take();
-                let builder = self.window_builder(&title, wanted);
+                let builder = crate::atlas::tear_off::builder(self, id, self.window_builder(&title, wanted)); // Atlas fork
                 self.with_window(id, |app| {
                     ctx.show_viewport_immediate(viewport, builder, |ui, class| app.window_pass(id, ui, class));
                 });
             }
         }
+        // Atlas fork: every window has had its pass; move the torn-off tab's window with the pointer.
+        crate::atlas::tear_off::follow(self, ctx);
     }
 
     /// One window's pass: where it is, its share of the frame's logic, and its contents.
