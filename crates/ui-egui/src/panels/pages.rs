@@ -237,6 +237,7 @@ pub(super) fn pages(
         });
         ui.add_space(4.0);
     }
+    crate::atlas::page_drop::panel(ui, t, view.id, &rows, editable && !modal); // Atlas fork: pages from another window land here.
     page_drag(ui, t, view, &rows, dropped);
     file_drop(ui, t, view, &rows, editable && !modal);
 }
@@ -305,6 +306,10 @@ fn page_drag(ui: &mut egui::Ui, t: &Tokens, view: &mut crate::DocView, rows: &[R
     // A drag that ended while the panel was closed (or elsewhere) leaves nothing to drop.
     if !dropped && !ui.input(|i| i.pointer.primary_down()) {
         view.panel_drag = None;
+        return;
+    }
+    // Atlas fork: dragged to another window, the pages go there (`atlas/page_drop.rs`).
+    if crate::atlas::page_drop::elsewhere(ui, view, &moving, dropped) {
         return;
     }
     let pointer = ui.input(|i| i.pointer.interact_pos());

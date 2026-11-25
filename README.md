@@ -84,6 +84,17 @@ This is PdfCraft's pull request
 [storytold/pdfcraft#3483](https://github.com/storytold/pdfcraft/pull/3483), merged into Atlas
 before upstream has merged it.
 
+### Pages between windows
+
+Drag page thumbnails out of the Pages panel and onto the Pages panel of a document in another
+Atlas PDF window: the pages are copied in at the gap under the pointer, selected, and the window
+comes to the front. The document they came from keeps them. A drag released anywhere else outside
+its window changes nothing. One Undo in the receiving document takes the pages out again.
+
+The drop needs to know where each window is on screen. X11 and Windows say so; Wayland doesn't,
+so there the pages stay in their own window, and Copy and **Paste after** in the thumbnails' menu
+do the same job. The code is `crates/ui-egui/src/atlas/page_drop.rs`.
+
 ### Printing drawings by page size
 
 Print reads each PDF's page size, preselects the paper and the printer that **Printer rules** give it
@@ -164,7 +175,7 @@ Upstream files carry one- to three-line hooks, each marked `Atlas fork`:
 - `ui-egui/src/{lib,state,app,canvas,hotbar,chrome,menus,editing}.rs`,
   `ui-egui/src/app/{control,keys}.rs`, `ui-egui/src/canvas/{page_input,page_cursor}.rs`,
   `ui-egui/src/control/host.rs`, `ui-egui/src/dialogs/preferences.rs` and
-  `ui-egui/src/panels/right.rs`;
+  `ui-egui/src/panels/{right,pages}.rs`;
 - `automation/src/{lib,dispatch,tools}.rs`;
 - `xtask/src/layers.rs`.
 
