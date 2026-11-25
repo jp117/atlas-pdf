@@ -2,10 +2,11 @@
 //!
 //! Everything Atlas adds to the window lives here, reached from a handful of one-line hooks in
 //! the upstream files (`state.rs`, `canvas.rs`, `chrome.rs`, `menus.rs`, `editing.rs`,
-//! `panels/right.rs`, `app/control.rs`, `app/keys.rs`), so the fork merges cleanly. Strings are plain English on purpose: `tl!` literals would have to be
+//! `panels/right.rs`, `panels/pages.rs`, `app.rs`, `app/control.rs`, `app/keys.rs`), so the fork merges cleanly. Strings are plain English on purpose: `tl!` literals would have to be
 //! added to every upstream translation catalogue.
 
 mod layers_panel;
+pub(crate) mod page_drop;
 pub(crate) mod print_routing;
 pub(crate) mod print_rules_ui;
 pub(crate) mod printer_papers;
