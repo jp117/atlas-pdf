@@ -21,7 +21,7 @@ const HOOKS: &[(&str, usize)] = &[
     ("AGENTS.md", 1),
     ("NOTICE", 1),
     ("README.md", 3),
-    ("ROADMAP.md", 7),
+    ("ROADMAP.md", 8),
     ("apps/pdfcraft-cli/src/run.rs", 1),
     ("apps/pdfcraft/Cargo.toml", 3),
     ("apps/pdfcraft/src/atlas_install.rs", 1),
